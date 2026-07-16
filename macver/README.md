@@ -6,7 +6,7 @@ plugin is still compiled for the iOS arm64 ABI first, then its build-version
 load command is converted to Mac Catalyst so that it can load in PlayCover.
 
 The 1.0.2 Unity offsets are retained because `../102/UnityFramework` and the
-framework inside `../102/1.ipa` have the same SHA-256 digest.
+framework inside `../102/1.0.2.ipa` have the same SHA-256 digest.
 
 The vendored Dobby attribution and hashes are recorded in
 `THIRD_PARTY_NOTICES.md`.
@@ -48,7 +48,7 @@ and ad-hoc signs the modified bundle.
 
 ## End-user package
 
-For a user who has only PlayCover and `1.ipa`, build a source-free package:
+For a user who has only PlayCover and `1.0.2.ipa`, build a source-free package:
 
 ```sh
 macver/package_release.sh
@@ -58,6 +58,13 @@ The resulting zip under `macver/dist` contains the compiled dylib, a native
 arm64 Mach-O injector, a double-clickable installer, and Chinese instructions.
 The end user does not need Theos, Xcode, Python, or disabled SIP. See
 [`end_user/安装说明.md`](end_user/安装说明.md).
+
+To bundle `102/1.0.2.ipa` and all required macOS installer files into one
+complete release archive:
+
+```sh
+macver/package_complete_release.sh
+```
 
 ## Runtime verification
 

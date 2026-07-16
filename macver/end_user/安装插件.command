@@ -34,7 +34,7 @@ if [ ! -d "/Applications/PlayCover.app" ]; then
 fi
 if [ ! -d "$APP_BUNDLE" ]; then
   echo "error: PlayCover 中还没有安装 DIGIMON_UP。" >&2
-  echo "请先使用 PlayCover 安装 1.ipa，确认应用出现在资料库中，再运行本脚本。" >&2
+  echo "请先使用 PlayCover 安装 1.0.2.ipa，确认应用出现在资料库中，再运行本脚本。" >&2
   exit 1
 fi
 if [ ! -f "$DYLIB_SOURCE" ]; then

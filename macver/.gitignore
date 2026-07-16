@@ -1,4 +1,5 @@
 .theos/
 build/mac/
 dist/*/
+dist/DIGIMON_UP-*-PlayCover.zip
 .DS_Store

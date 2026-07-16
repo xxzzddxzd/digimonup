@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-IPA="${IPA:-$ROOT_DIR/102/1.ipa}"
+IPA="${IPA:-$ROOT_DIR/102/1.0.2.ipa}"
 PLAYCOVER_APP="${PLAYCOVER_APP:-/Applications/PlayCover.app}"
 PLAYCOVER_APPS="${PLAYCOVER_APPS:-$HOME/Library/Containers/io.playcover.PlayCover/Applications}"
 APP_ID="${APP_ID:-jp.co.bandainamcoent.BNEI0442}"

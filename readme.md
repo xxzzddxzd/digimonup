@@ -10,14 +10,15 @@
 ## Mac 使用方法
 
 适用环境：Apple Silicon Mac、安装在 `/Applications` 中的 PlayCover，以及
-`DIGIMON_UP 1.0.2 (38)` 的 `1.ipa`。不需要越狱、关闭 SIP、Xcode、Python 或
+`DIGIMON_UP 1.0.2 (38)` 的 `1.0.2.ipa`。不需要越狱、关闭 SIP、Xcode、Python 或
 Theos。
 
 > 单独把 `PCMacProbe.dylib` 拖入 PlayCover 不会生效。游戏主程序需要加入 dylib
 > 加载命令并重新签名，请使用发布包中的安装脚本。
 
-1. 下载并解压 [`PCMacProbe-mac-1.0.2.zip`](macver/dist/PCMacProbe-mac-1.0.2.zip)。
-2. 打开 PlayCover，双击 `1.ipa` 或将它拖入 PlayCover 完成安装。
+1. 从 [v1.0.2 Release](https://github.com/xxzzddxzd/digimonup/releases/tag/v1.0.2)
+   下载并解压 `DIGIMON_UP-1.0.2-PlayCover.zip`。
+2. 打开 PlayCover，双击 `1.0.2.ipa` 或将它拖入 PlayCover 完成安装。
 3. 确认 `DIGIMON_UP` 已出现在 PlayCover 资料库，然后退出正在运行的游戏。
 4. 右键点击插件包内的 `安装插件.command`，选择“打开”并确认运行。
 5. 终端显示“安装完成”后，从 PlayCover 启动游戏。
