@@ -1,3 +1,4 @@
 .theos/
 build/mac/
+dist/*/
 .DS_Store

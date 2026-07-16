@@ -46,6 +46,19 @@ The injection script creates a timestamped backup beside the installed app,
 adds `@executable_path/Frameworks/PCMacProbe.dylib` to the main executable,
 and ad-hoc signs the modified bundle.
 
+## End-user package
+
+For a user who has only PlayCover and `1.ipa`, build a source-free package:
+
+```sh
+macver/package_release.sh
+```
+
+The resulting zip under `macver/dist` contains the compiled dylib, a native
+arm64 Mach-O injector, a double-clickable installer, and Chinese instructions.
+The end user does not need Theos, Xcode, Python, or disabled SIP. See
+[`end_user/安装说明.md`](end_user/安装说明.md).
+
 ## Runtime verification
 
 ```sh
