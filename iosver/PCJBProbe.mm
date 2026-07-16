@@ -509,6 +509,62 @@ static float pc_timeRewardGetRemainTime(void *instance, int32_t type, const void
     return original;
 }
 
+// UILogin only exposes the title-screen entry controls after all asset/version
+// checks have completed.  Start the same stored-account login used by BtnStart
+// at that exact point, so readiness checks are preserved without requiring a
+// physical "Touch to Start" tap.  E_LOGIN_TYPE.Guest == 2.
+static void (*gUILoginStartLoginRequest)(void *, int32_t, const void *);
+static void (*orig_uiLoginShowStartButton)(void *, bool, const void *);
+static void *gLastAutoLoginInstance;
+
+static void pc_uiLoginShowStartButton(void *instance, bool show, const void *method) {
+    orig_uiLoginShowStartButton(instance, show, method);
+    if (!show || !instance || !gUILoginStartLoginRequest ||
+        instance == gLastAutoLoginInstance) {
+        return;
+    }
+
+    gLastAutoLoginInstance = instance;
+    NSLog(@"#pc  UILogin.AutoStart instance=%p loginType=Guest", instance);
+    gUILoginStartLoginRequest(instance, 2, nullptr);
+}
+
+// MainScene.OpenAwakeUI runs these four display-only coroutines in order after
+// purchase recovery and main-scene initialization.  Completing only these
+// iterators suppresses the automatic startup popups while leaving the rest of
+// C_StartSequence intact.  Their normal/manual feature entry points are not
+// hooked, and the rewarded-ad card logic above remains active.
+static bool PCFinishStartupPopup(void *iterator, const char *name) {
+    if (iterator) {
+        int32_t *state = (int32_t *)((uint8_t *)iterator + 0x10);
+        if (*state == 0) {
+            NSLog(@"#pc  MainScene.StartupPopup skipped=%s iterator=%p", name, iterator);
+        }
+        *state = -1;
+    }
+    return false;
+}
+
+static bool (*orig_openNoticeMoveNext)(void *, const void *);
+static bool pc_openNoticeMoveNext(void *iterator, const void *method) {
+    return PCFinishStartupPopup(iterator, "OpenNotice");
+}
+
+static bool (*orig_openLoginBonusMoveNext)(void *, const void *);
+static bool pc_openLoginBonusMoveNext(void *iterator, const void *method) {
+    return PCFinishStartupPopup(iterator, "OpenLoginBonus");
+}
+
+static bool (*orig_openAFKMoveNext)(void *, const void *);
+static bool pc_openAFKMoveNext(void *iterator, const void *method) {
+    return PCFinishStartupPopup(iterator, "OpenAFK");
+}
+
+static bool (*orig_openTimeDealMoveNext)(void *, const void *);
+static bool pc_openTimeDealMoveNext(void *iterator, const void *method) {
+    return PCFinishStartupPopup(iterator, "OpenTimeDeal");
+}
+
 // The main-scene task box is tp.UIGuideQuestInfo. SetData stores its current
 // QuestInfo at +0x28 and toggles the completed prompt GameObject at +0x40.
 // Its click handler only calls PS_QuestComplete.Request when the quest is
@@ -603,6 +659,8 @@ static void PCInstallUnityHooks(intptr_t slide) {
         (void (*)(void *, const void *))(slide + 0x2EEC074);
     gGameObjectSetActive =
         (void (*)(void *, bool, const void *))(slide + 0x6A3A5F0);
+    gUILoginStartLoginRequest =
+        (void (*)(void *, int32_t, const void *))(slide + 0x326A5D4);
 
     PCHook((void *)(slide + 0x0E51644), (void *)pc_jailbreakCheck,
            (void **)&orig_jailbreakCheck, "native_jailbreak_check_0xE51644");
@@ -629,6 +687,21 @@ static void PCInstallUnityHooks(intptr_t slide) {
     PCHook((void *)(slide + 0x2DBA910), (void *)pc_timeRewardGetRemainTime,
            (void **)&orig_timeRewardGetRemainTime,
            "TimeRewardListParam.GetRemainTime_AdRemove_0x2DBA910");
+    PCHook((void *)(slide + 0x326A0E4), (void *)pc_uiLoginShowStartButton,
+           (void **)&orig_uiLoginShowStartButton,
+           "UILogin.ShowStartButton_auto_start_0x326A0E4");
+    PCHook((void *)(slide + 0x2F19F64), (void *)pc_openNoticeMoveNext,
+           (void **)&orig_openNoticeMoveNext,
+           "MainScene.OpenNotice.MoveNext_skip_0x2F19F64");
+    PCHook((void *)(slide + 0x2F19B24), (void *)pc_openLoginBonusMoveNext,
+           (void **)&orig_openLoginBonusMoveNext,
+           "MainScene.OpenLoginBonus.MoveNext_skip_0x2F19B24");
+    PCHook((void *)(slide + 0x2F18C00), (void *)pc_openAFKMoveNext,
+           (void **)&orig_openAFKMoveNext,
+           "MainScene.OpenAFK.MoveNext_skip_0x2F18C00");
+    PCHook((void *)(slide + 0x2F1A8E8), (void *)pc_openTimeDealMoveNext,
+           (void **)&orig_openTimeDealMoveNext,
+           "MainScene.OpenTimeDeal.MoveNext_skip_0x2F1A8E8");
     PCHook((void *)(slide + 0x320ED20), (void *)pc_guideQuestSetData,
            (void **)&orig_guideQuestSetData,
            "UIGuideQuestInfo.SetData_auto_claim_0x320ED20");
