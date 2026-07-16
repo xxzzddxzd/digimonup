@@ -654,6 +654,52 @@ static void pc_itemSelectSetData(void *instance, void *info, int32_t openType,
     gItemSelectClose(instance, nullptr);
 }
 
+// The Firewall dungeon's StartDungeon coroutine normally downloads every
+// ranking page and several ranked-player details before it calls PlayDungeon.
+// If any ranking request stalls, UIDungeonReady_Firewall._isClicked remains
+// set and the challenge button silently ignores every later tap.  The original
+// Event_Click is left intact so its content/ticket checks still run; only the
+// coroutine reached after those checks is shortened to the same PlayDungeon
+// transition used by ordinary dungeons.
+static void *gGameInfoInstance;
+static void (*orig_gameInfoUpdateBattleStart)(void *, const void *);
+static void (*gGameInfoPlayDungeon)(void *, int32_t, int32_t, int32_t,
+                                    const void *);
+static bool (*orig_firewallStartDungeonMoveNext)(void *, const void *);
+
+static void pc_gameInfoUpdateBattleStart(void *instance, const void *method) {
+    if (instance && instance != gGameInfoInstance) {
+        gGameInfoInstance = instance;
+        NSLog(@"#pc  GameInfo captured instance=%p", instance);
+    }
+    orig_gameInfoUpdateBattleStart(instance, method);
+}
+
+static bool pc_firewallStartDungeonMoveNext(void *iterator,
+                                            const void *method) {
+    if (!iterator || *(int32_t *)((uint8_t *)iterator + 0x10) != 0) {
+        return orig_firewallStartDungeonMoveNext(iterator, method);
+    }
+
+    void *ready = *(void **)((uint8_t *)iterator + 0x20);
+    void *data = ready ? *(void **)((uint8_t *)ready + 0x98) : nullptr;
+    void *stage = data ? *(void **)((uint8_t *)data + 0x58) : nullptr;
+    if (!ready || !stage || !gGameInfoInstance || !gGameInfoPlayDungeon) {
+        NSLog(@"#pc  FirewallDungeon.DirectStart fallback iterator=%p ready=%p "
+              "stage=%p gameInfo=%p",
+              iterator, ready, stage, gGameInfoInstance);
+        return orig_firewallStartDungeonMoveNext(iterator, method);
+    }
+
+    int32_t stageIndex = *(int32_t *)((uint8_t *)stage + 0x2C);
+    int32_t level = *(int32_t *)((uint8_t *)ready + 0xA0);
+    *(int32_t *)((uint8_t *)iterator + 0x10) = -1;
+    NSLog(@"#pc  FirewallDungeon.DirectStart stage=%d sector=1 level=%d",
+          stageIndex, level);
+    gGameInfoPlayDungeon(gGameInfoInstance, stageIndex, 1, level, nullptr);
+    return false;
+}
+
 // UIMainScene.CreateRelationEmoji is reached only after the partner-relation
 // cooldown has expired and the main-battle HUD has made the random "care"
 // icon active.  Reuse TouchRelationEmoji after creation; it performs the same
@@ -793,6 +839,9 @@ static void PCInstallUnityHooks(intptr_t slide) {
         (void (*)(void *, const void *))(slide + 0x2FAE02C);
     gMainSceneTouchRelationEmoji =
         (bool (*)(void *, const void *))(slide + 0x319E020);
+    gGameInfoPlayDungeon =
+        (void (*)(void *, int32_t, int32_t, int32_t, const void *))
+            (slide + 0x2DA535C);
 
     PCHook((void *)(slide + 0x0E51644), (void *)pc_jailbreakCheck,
            (void **)&orig_jailbreakCheck, "native_jailbreak_check_0xE51644");
@@ -846,6 +895,14 @@ static void PCInstallUnityHooks(intptr_t slide) {
     PCHook((void *)(slide + 0x2FACE08), (void *)pc_itemSelectSetData,
            (void **)&orig_itemSelectSetData,
            "UIItemSelect.SetData_item_spawner_auto_equip_0x2FACE08");
+    PCHook((void *)(slide + 0x2DAADFC),
+           (void *)pc_gameInfoUpdateBattleStart,
+           (void **)&orig_gameInfoUpdateBattleStart,
+           "GameInfo.UpdateBattleStart_capture_0x2DAADFC");
+    PCHook((void *)(slide + 0x30391D0),
+           (void *)pc_firewallStartDungeonMoveNext,
+           (void **)&orig_firewallStartDungeonMoveNext,
+           "UIDungeonReady_Firewall.StartDungeon.MoveNext_direct_0x30391D0");
     PCHook((void *)(slide + 0x319DB10),
            (void *)pc_mainSceneCreateRelationEmoji,
            (void **)&orig_mainSceneCreateRelationEmoji,
