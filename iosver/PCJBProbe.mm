@@ -654,6 +654,37 @@ static void pc_itemSelectSetData(void *instance, void *info, int32_t openType,
     gItemSelectClose(instance, nullptr);
 }
 
+// UIMainScene.CreateRelationEmoji is reached only after the partner-relation
+// cooldown has expired and the main-battle HUD has made the random "care"
+// icon active.  Reuse TouchRelationEmoji after creation; it performs the same
+// object/cooldown checks as a physical tap and then sends
+// PS_PartnerRelationExp.Request.  The short guard protects against duplicate
+// requests if the same UI instance is refreshed more than once in a frame.
+static void (*orig_mainSceneCreateRelationEmoji)(void *, const void *);
+static bool (*gMainSceneTouchRelationEmoji)(void *, const void *);
+static void *gLastAutoCareEmoji;
+static NSTimeInterval gLastAutoCareRequestTime;
+
+static void pc_mainSceneCreateRelationEmoji(void *instance, const void *method) {
+    orig_mainSceneCreateRelationEmoji(instance, method);
+    if (!instance || !gMainSceneTouchRelationEmoji) return;
+
+    void *emoji = *(void **)((uint8_t *)instance + 0xE8);
+    if (!emoji) return;
+
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    if (emoji == gLastAutoCareEmoji && now - gLastAutoCareRequestTime < 2.0) {
+        return;
+    }
+
+    if (gMainSceneTouchRelationEmoji(instance, nullptr)) {
+        gLastAutoCareEmoji = emoji;
+        gLastAutoCareRequestTime = now;
+        NSLog(@"#pc  PartnerRelation.AutoCare requested scene=%p emoji=%p",
+              instance, emoji);
+    }
+}
+
 // The main-scene task box is tp.UIGuideQuestInfo. SetData stores its current
 // QuestInfo at +0x28 and toggles the completed prompt GameObject at +0x40.
 // Its click handler only calls PS_QuestComplete.Request when the quest is
@@ -760,6 +791,8 @@ static void PCInstallUnityHooks(intptr_t slide) {
         (void (*)(int32_t, void *, bool, const void *))(slide + 0x2EC6884);
     gItemSelectClose =
         (void (*)(void *, const void *))(slide + 0x2FAE02C);
+    gMainSceneTouchRelationEmoji =
+        (bool (*)(void *, const void *))(slide + 0x319E020);
 
     PCHook((void *)(slide + 0x0E51644), (void *)pc_jailbreakCheck,
            (void **)&orig_jailbreakCheck, "native_jailbreak_check_0xE51644");
@@ -813,6 +846,10 @@ static void PCInstallUnityHooks(intptr_t slide) {
     PCHook((void *)(slide + 0x2FACE08), (void *)pc_itemSelectSetData,
            (void **)&orig_itemSelectSetData,
            "UIItemSelect.SetData_item_spawner_auto_equip_0x2FACE08");
+    PCHook((void *)(slide + 0x319DB10),
+           (void *)pc_mainSceneCreateRelationEmoji,
+           (void **)&orig_mainSceneCreateRelationEmoji,
+           "UIMainScene.CreateRelationEmoji_auto_care_0x319DB10");
     PCHook((void *)(slide + 0x320ED20), (void *)pc_guideQuestSetData,
            (void **)&orig_guideQuestSetData,
            "UIGuideQuestInfo.SetData_auto_claim_0x320ED20");
