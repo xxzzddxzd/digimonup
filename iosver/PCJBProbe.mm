@@ -509,6 +509,49 @@ static float pc_timeRewardGetRemainTime(void *instance, int32_t type, const void
     return original;
 }
 
+// The main-scene task box is tp.UIGuideQuestInfo. SetData stores its current
+// QuestInfo at +0x28 and toggles the completed prompt GameObject at +0x40.
+// Its click handler only calls PS_QuestComplete.Request when the quest is
+// complete, so perform that same request directly and keep the prompt hidden.
+static bool (*gQuestInfoIsComplete)(void *, const void *);
+static bool (*gQuestInfoIsGetReward)(void *, const void *);
+static int32_t (*gQuestInfoGetKey)(void *, const void *);
+static void (*gQuestCompleteRequest)(void *, const void *);
+static void (*gGameObjectSetActive)(void *, bool, const void *);
+static void (*orig_guideQuestSetData)(void *, const void *);
+static int32_t gLastAutoClaimQuestKey = -1;
+static NSTimeInterval gLastAutoClaimRequestTime;
+
+static void pc_guideQuestSetData(void *instance, const void *method) {
+    orig_guideQuestSetData(instance, method);
+    if (!instance) return;
+
+    void *completePrompt = *(void **)((uint8_t *)instance + 0x40);
+    if (completePrompt && gGameObjectSetActive) {
+        gGameObjectSetActive(completePrompt, false, nullptr);
+    }
+
+    void *info = *(void **)((uint8_t *)instance + 0x28);
+    if (!info || !gQuestInfoIsComplete || !gQuestInfoIsGetReward ||
+        !gQuestInfoGetKey || !gQuestCompleteRequest) {
+        return;
+    }
+    if (!gQuestInfoIsComplete(info, nullptr) ||
+        gQuestInfoIsGetReward(info, nullptr)) {
+        return;
+    }
+
+    int32_t key = gQuestInfoGetKey(info, nullptr);
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    if (key == gLastAutoClaimQuestKey && now - gLastAutoClaimRequestTime < 10.0) {
+        return;
+    }
+    gLastAutoClaimQuestKey = key;
+    gLastAutoClaimRequestTime = now;
+    NSLog(@"#pc  GuideQuest.AutoClaim key=%d info=%p", key, info);
+    gQuestCompleteRequest(info, nullptr);
+}
+
 static const char *PCUnityLogLevelName(int32_t level) {
     switch (level) {
         case 0: return "Error";
@@ -550,6 +593,17 @@ static void PCInstallUnityHooks(intptr_t slide) {
     PCPatchInstruction(slide, 0x2FB5B50, 0x1E20CC20, 0x1E2C1000,
                        "UIItemSpawnerInfo.auto_open_delay_0.5s");
 
+    gQuestInfoIsComplete =
+        (bool (*)(void *, const void *))(slide + 0x2DE9468);
+    gQuestInfoIsGetReward =
+        (bool (*)(void *, const void *))(slide + 0x2DE9560);
+    gQuestInfoGetKey =
+        (int32_t (*)(void *, const void *))(slide + 0x2DEA18C);
+    gQuestCompleteRequest =
+        (void (*)(void *, const void *))(slide + 0x2EEC074);
+    gGameObjectSetActive =
+        (void (*)(void *, bool, const void *))(slide + 0x6A3A5F0);
+
     PCHook((void *)(slide + 0x0E51644), (void *)pc_jailbreakCheck,
            (void **)&orig_jailbreakCheck, "native_jailbreak_check_0xE51644");
     PCHook((void *)(slide + 0x32977C8), (void *)pc_globalQuit,
@@ -575,6 +629,9 @@ static void PCInstallUnityHooks(intptr_t slide) {
     PCHook((void *)(slide + 0x2DBA910), (void *)pc_timeRewardGetRemainTime,
            (void **)&orig_timeRewardGetRemainTime,
            "TimeRewardListParam.GetRemainTime_AdRemove_0x2DBA910");
+    PCHook((void *)(slide + 0x320ED20), (void *)pc_guideQuestSetData,
+           (void **)&orig_guideQuestSetData,
+           "UIGuideQuestInfo.SetData_auto_claim_0x320ED20");
 
     PCHook((void *)(slide + 0x69B7B20), (void *)pc_unityInternalLog,
            (void **)&orig_unityInternalLog, "DebugLogHandler.Internal_Log_0x69B7B20");
