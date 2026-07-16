@@ -1,0 +1,7 @@
+{
+    Filter = {
+        Bundles = (
+            "jp.co.bandainamcoent.BNEI0442"
+        );
+    };
+}
