@@ -14,6 +14,7 @@
 #import <errno.h>
 #import <pthread.h>
 #import <sys/time.h>
+#import <dispatch/dispatch.h>
 
 typedef void (*MSHookFunctionType)(void *symbol, void *replace, void **result);
 typedef void (*MSHookMemoryType)(void *target, const void *data, size_t size);
@@ -565,6 +566,94 @@ static bool pc_openTimeDealMoveNext(void *iterator, const void *method) {
     return PCFinishStartupPopup(iterator, "OpenTimeDeal");
 }
 
+// UIPopupReward.ShowCompete is called when the reward animation has finished
+// and the UI has changed to its final "tap to close" state.  Reuse OnBack two
+// seconds later because it performs the same close callback as a real tap.
+static void (*orig_popupRewardShowComplete)(void *, const void *);
+static bool (*orig_popupRewardOnBack)(void *, const void *);
+static bool (*gUnityObjectImplicit)(void *, const void *);
+static void *gPendingRewardPopup;
+static uint64_t gRewardPopupGeneration;
+
+static bool pc_popupRewardOnBack(void *instance, const void *method) {
+    if (instance && instance == gPendingRewardPopup) {
+        gPendingRewardPopup = nullptr;
+        gRewardPopupGeneration++;
+    }
+    return orig_popupRewardOnBack(instance, method);
+}
+
+static void pc_popupRewardShowComplete(void *instance, const void *method) {
+    orig_popupRewardShowComplete(instance, method);
+    if (!instance || !orig_popupRewardOnBack) return;
+
+    gPendingRewardPopup = instance;
+    uint64_t generation = ++gRewardPopupGeneration;
+    NSLog(@"#pc  UIPopupReward.AutoClose scheduled instance=%p delay=2.0s", instance);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gPendingRewardPopup != instance ||
+            gRewardPopupGeneration != generation) {
+            return;
+        }
+        if (gUnityObjectImplicit && !gUnityObjectImplicit(instance, nullptr)) {
+            gPendingRewardPopup = nullptr;
+            gRewardPopupGeneration++;
+            NSLog(@"#pc  UIPopupReward.AutoClose cancelled instance=%p destroyed=1",
+                  instance);
+            return;
+        }
+
+        gPendingRewardPopup = nullptr;
+        gRewardPopupGeneration++;
+        NSLog(@"#pc  UIPopupReward.AutoClose firing instance=%p", instance);
+        orig_popupRewardOnBack(instance, nullptr);
+    });
+}
+
+// C_Result is the hologram equipment-result pipeline.  It opens UIItemSelect
+// only when DataUtil.CompareStatEquipedItem reports that the new item is better.
+// Mark that synchronous call path so UIItemSelect instances opened elsewhere
+// keep their normal manual behaviour.  Auto-equip reuses PS_ItemEquip.Request;
+// its response already resumes SpawnItem when item-spawner auto mode is active.
+static __thread int gItemSpawnerResultDepth;
+static bool (*orig_itemSpawnerResultMoveNext)(void *, const void *);
+static void (*orig_itemSelectSetData)(void *, void *, int32_t, void *, const void *);
+static int32_t (*gItemInfoGetType)(void *, const void *);
+static void *(*gItemInfoGetStringUID)(void *, const void *);
+static void (*gItemEquipRequest)(int32_t, void *, bool, const void *);
+static void (*gItemSelectClose)(void *, const void *);
+
+static bool pc_itemSpawnerResultMoveNext(void *iterator, const void *method) {
+    gItemSpawnerResultDepth++;
+    bool result = orig_itemSpawnerResultMoveNext(iterator, method);
+    gItemSpawnerResultDepth--;
+    return result;
+}
+
+static void pc_itemSelectSetData(void *instance, void *info, int32_t openType,
+                                 void *userName, const void *method) {
+    bool fromItemSpawner = gItemSpawnerResultDepth > 0 && openType == 0;
+    orig_itemSelectSetData(instance, info, openType, userName, method);
+    if (!fromItemSpawner || !instance || !info || !gItemInfoGetType ||
+        !gItemInfoGetStringUID || !gItemEquipRequest || !gItemSelectClose) {
+        return;
+    }
+
+    int32_t itemType = gItemInfoGetType(info, nullptr);
+    void *uid = gItemInfoGetStringUID(info, nullptr);
+    if (!uid) {
+        NSLog(@"#pc  ItemSpawner.AutoEquip skipped info=%p reason=no_uid", info);
+        return;
+    }
+
+    NSLog(@"#pc  ItemSpawner.AutoEquip request info=%p type=%d uid=%@",
+          info, itemType, PCStringFromIl2Cpp(uid));
+    gItemEquipRequest(itemType, uid, true, nullptr);
+    gItemSelectClose(instance, nullptr);
+}
+
 // The main-scene task box is tp.UIGuideQuestInfo. SetData stores its current
 // QuestInfo at +0x28 and toggles the completed prompt GameObject at +0x40.
 // Its click handler only calls PS_QuestComplete.Request when the quest is
@@ -661,6 +750,16 @@ static void PCInstallUnityHooks(intptr_t slide) {
         (void (*)(void *, bool, const void *))(slide + 0x6A3A5F0);
     gUILoginStartLoginRequest =
         (void (*)(void *, int32_t, const void *))(slide + 0x326A5D4);
+    gUnityObjectImplicit =
+        (bool (*)(void *, const void *))(slide + 0x6A42928);
+    gItemInfoGetType =
+        (int32_t (*)(void *, const void *))(slide + 0x2DB16E8);
+    gItemInfoGetStringUID =
+        (void *(*)(void *, const void *))(slide + 0x2DB1694);
+    gItemEquipRequest =
+        (void (*)(int32_t, void *, bool, const void *))(slide + 0x2EC6884);
+    gItemSelectClose =
+        (void (*)(void *, const void *))(slide + 0x2FAE02C);
 
     PCHook((void *)(slide + 0x0E51644), (void *)pc_jailbreakCheck,
            (void **)&orig_jailbreakCheck, "native_jailbreak_check_0xE51644");
@@ -702,6 +801,18 @@ static void PCInstallUnityHooks(intptr_t slide) {
     PCHook((void *)(slide + 0x2F1A8E8), (void *)pc_openTimeDealMoveNext,
            (void **)&orig_openTimeDealMoveNext,
            "MainScene.OpenTimeDeal.MoveNext_skip_0x2F1A8E8");
+    PCHook((void *)(slide + 0x320C998), (void *)pc_popupRewardOnBack,
+           (void **)&orig_popupRewardOnBack,
+           "UIPopupReward.OnBack_auto_close_0x320C998");
+    PCHook((void *)(slide + 0x320CDC8), (void *)pc_popupRewardShowComplete,
+           (void **)&orig_popupRewardShowComplete,
+           "UIPopupReward.ShowCompete_auto_close_0x320CDC8");
+    PCHook((void *)(slide + 0x2FB5ECC), (void *)pc_itemSpawnerResultMoveNext,
+           (void **)&orig_itemSpawnerResultMoveNext,
+           "UIItemSpawnerInfo.C_Result.MoveNext_auto_equip_0x2FB5ECC");
+    PCHook((void *)(slide + 0x2FACE08), (void *)pc_itemSelectSetData,
+           (void **)&orig_itemSelectSetData,
+           "UIItemSelect.SetData_item_spawner_auto_equip_0x2FACE08");
     PCHook((void *)(slide + 0x320ED20), (void *)pc_guideQuestSetData,
            (void **)&orig_guideQuestSetData,
            "UIGuideQuestInfo.SetData_auto_claim_0x320ED20");
