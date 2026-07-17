@@ -1,0 +1,212 @@
+{
+  "summary": {
+    "runs": 6,
+    "wins": 6,
+    "fails": 0,
+    "win_rate": 1.0,
+    "stage_wins": {
+      "28-10": 1,
+      "29-1": 1,
+      "29-2": 1,
+      "29-3": 1,
+      "29-4": 1,
+      "29-5": 1
+    },
+    "drops": {
+      "Goods/ItemTicket": {
+        "total": 60,
+        "hit_runs": 6,
+        "avg_per_win": 10.0,
+        "drop_rate": 1.0
+      }
+    }
+  },
+  "history": [
+    {
+      "ok": true,
+      "region": 1,
+      "stage": 28,
+      "sector": 10,
+      "code": 0,
+      "message": null,
+      "drops": [
+        {
+          "reward_type": 1,
+          "value": 50,
+          "count": 10,
+          "label": "Goods/ItemTicket",
+          "source": "rewardList",
+          "meta": {
+            "metaList": {
+              "_list": []
+            }
+          }
+        }
+      ],
+      "battle_after": {
+        "_region": 1,
+        "_stage": 29,
+        "_sector": 1,
+        "_repeat": 0,
+        "_state": 0,
+        "_reason": 1
+      },
+      "ts": 1784256826
+    },
+    {
+      "ok": true,
+      "region": 1,
+      "stage": 29,
+      "sector": 1,
+      "code": 0,
+      "message": null,
+      "drops": [
+        {
+          "reward_type": 1,
+          "value": 50,
+          "count": 10,
+          "label": "Goods/ItemTicket",
+          "source": "rewardList",
+          "meta": {
+            "metaList": {
+              "_list": []
+            }
+          }
+        }
+      ],
+      "battle_after": {
+        "_region": 1,
+        "_stage": 29,
+        "_sector": 2,
+        "_repeat": 0,
+        "_state": 0,
+        "_reason": 1
+      },
+      "ts": 1784256853
+    },
+    {
+      "ok": true,
+      "region": 1,
+      "stage": 29,
+      "sector": 2,
+      "code": 0,
+      "message": null,
+      "drops": [
+        {
+          "reward_type": 1,
+          "value": 50,
+          "count": 10,
+          "label": "Goods/ItemTicket",
+          "source": "rewardList",
+          "meta": {
+            "metaList": {
+              "_list": []
+            }
+          }
+        }
+      ],
+      "battle_after": {
+        "_region": 1,
+        "_stage": 29,
+        "_sector": 3,
+        "_repeat": 0,
+        "_state": 0,
+        "_reason": 1
+      },
+      "ts": 1784256879
+    },
+    {
+      "ok": true,
+      "region": 1,
+      "stage": 29,
+      "sector": 3,
+      "code": 0,
+      "message": null,
+      "drops": [
+        {
+          "reward_type": 1,
+          "value": 50,
+          "count": 10,
+          "label": "Goods/ItemTicket",
+          "source": "rewardList",
+          "meta": {
+            "metaList": {
+              "_list": []
+            }
+          }
+        }
+      ],
+      "battle_after": {
+        "_region": 1,
+        "_stage": 29,
+        "_sector": 4,
+        "_repeat": 0,
+        "_state": 0,
+        "_reason": 1
+      },
+      "ts": 1784256905
+    },
+    {
+      "ok": true,
+      "region": 1,
+      "stage": 29,
+      "sector": 4,
+      "code": 0,
+      "message": null,
+      "drops": [
+        {
+          "reward_type": 1,
+          "value": 50,
+          "count": 10,
+          "label": "Goods/ItemTicket",
+          "source": "rewardList",
+          "meta": {
+            "metaList": {
+              "_list": []
+            }
+          }
+        }
+      ],
+      "battle_after": {
+        "_region": 1,
+        "_stage": 29,
+        "_sector": 5,
+        "_repeat": 0,
+        "_state": 0,
+        "_reason": 1
+      },
+      "ts": 1784256931
+    },
+    {
+      "ok": true,
+      "region": 1,
+      "stage": 29,
+      "sector": 5,
+      "code": 0,
+      "message": null,
+      "drops": [
+        {
+          "reward_type": 1,
+          "value": 50,
+          "count": 10,
+          "label": "Goods/ItemTicket",
+          "source": "rewardList",
+          "meta": {
+            "metaList": {
+              "_list": []
+            }
+          }
+        }
+      ],
+      "battle_after": {
+        "_region": 1,
+        "_stage": 29,
+        "_sector": 6,
+        "_repeat": 0,
+        "_state": 0,
+        "_reason": 1
+      },
+      "ts": 1784256957
+    }
+  ]
+}

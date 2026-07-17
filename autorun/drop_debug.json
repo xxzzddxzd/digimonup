@@ -1,0 +1,89 @@
+{
+  "summary": {
+    "runs": 7,
+    "wins": 0,
+    "fails": 7,
+    "win_rate": 0.0,
+    "stage_wins": {},
+    "drops": {}
+  },
+  "history": [
+    {
+      "ok": false,
+      "region": 1,
+      "stage": 25,
+      "sector": 1,
+      "code": -28002,
+      "message": "잘못된 스테이지입니다.",
+      "drops": [],
+      "battle_after": {},
+      "ts": 1784252695
+    },
+    {
+      "ok": false,
+      "region": 1,
+      "stage": 25,
+      "sector": 1,
+      "code": -28002,
+      "message": "잘못된 스테이지입니다.",
+      "drops": [],
+      "battle_after": {},
+      "ts": 1784253305
+    },
+    {
+      "ok": false,
+      "region": 1,
+      "stage": 25,
+      "sector": 1,
+      "code": -28002,
+      "message": "잘못된 스테이지입니다.",
+      "drops": [],
+      "battle_after": {},
+      "ts": 1784253918
+    },
+    {
+      "ok": false,
+      "region": 1,
+      "stage": 25,
+      "sector": 1,
+      "code": -28002,
+      "message": "잘못된 스테이지입니다.",
+      "drops": [],
+      "battle_after": {},
+      "ts": 1784254530
+    },
+    {
+      "ok": false,
+      "region": 1,
+      "stage": 25,
+      "sector": 1,
+      "code": -28002,
+      "message": "잘못된 스테이지입니다.",
+      "drops": [],
+      "battle_after": {},
+      "ts": 1784255140
+    },
+    {
+      "ok": false,
+      "region": 1,
+      "stage": 25,
+      "sector": 1,
+      "code": -28002,
+      "message": "잘못된 스테이지입니다.",
+      "drops": [],
+      "battle_after": {},
+      "ts": 1784255751
+    },
+    {
+      "ok": false,
+      "region": 1,
+      "stage": 25,
+      "sector": 1,
+      "code": -28002,
+      "message": "잘못된 스테이지입니다.",
+      "drops": [],
+      "battle_after": {},
+      "ts": 1784256362
+    }
+  ]
+}

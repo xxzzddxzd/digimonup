@@ -1,0 +1,47 @@
+{
+  "ok": false,
+  "login_pipeline": {
+    "session_key": "f93105c8-09dd-422a-bbc0-7d7173dc6b5f",
+    "auth_code": 0,
+    "public_uid": "118SJ4C6STCBB29AQ6JI",
+    "server_num": 14,
+    "login": {
+      "_code": 0,
+      "_maintenanceInfos": {
+        "_list": [
+          {
+            "_type": 1,
+            "_version": 2,
+            "_isForced": false,
+            "_startAt": 1784124000000,
+            "_endAt": 1784264400000
+          },
+          {
+            "_type": 4,
+            "_version": 12,
+            "_isForced": false,
+            "_startAt": 1784257200000,
+            "_endAt": 1784264400000
+          }
+        ],
+        "_isWhitelisted": false
+      },
+      "_serverNum": 14,
+      "_serverTime": 1784254596783,
+      "_serverStartTime": 1784095200000
+    },
+    "battle_info": {
+      "_region": 1,
+      "_stage": 26,
+      "_sector": 10,
+      "_repeat": 0,
+      "_state": 0,
+      "_reason": 4
+    },
+    "init_keys": [
+      "_code",
+      "_initData",
+      "_maintenanceInfos"
+    ]
+  }
+}

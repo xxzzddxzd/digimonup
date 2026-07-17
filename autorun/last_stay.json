@@ -1,0 +1,64 @@
+{
+  "ok": true,
+  "login_pipeline": {
+    "session_key": "a2866136-b894-4c7a-8b20-419d04b08960",
+    "auth_code": 0,
+    "public_uid": "118SJ4C6STCBB29AQ6JI",
+    "server_num": 14,
+    "login": {
+      "_code": 0,
+      "_maintenanceInfos": {
+        "_list": [
+          {
+            "_type": 1,
+            "_version": 0,
+            "_isForced": false,
+            "_startAt": 1784124000000,
+            "_endAt": 1785423600000
+          },
+          {
+            "_type": 4,
+            "_version": 9,
+            "_isForced": false,
+            "_startAt": 1784021177000,
+            "_endAt": 1784098800000
+          }
+        ],
+        "_isWhitelisted": false
+      },
+      "_serverNum": 14,
+      "_serverTime": 1784209187799,
+      "_serverStartTime": 1784095200000
+    },
+    "battle_info": {
+      "_region": 1,
+      "_stage": 24,
+      "_sector": 2,
+      "_repeat": 0,
+      "_state": 0,
+      "_reason": 0
+    },
+    "init_keys": [
+      "_code",
+      "_initData",
+      "_maintenanceInfos"
+    ]
+  },
+  "farm_summary": {
+    "runs": 1,
+    "wins": 1,
+    "fails": 0,
+    "win_rate": 1.0,
+    "stage_wins": {
+      "24-2": 1
+    },
+    "drops": {
+      "Goods/ItemTicket": {
+        "total": 10,
+        "hit_runs": 1,
+        "avg_per_win": 10.0,
+        "drop_rate": 1.0
+      }
+    }
+  }
+}
