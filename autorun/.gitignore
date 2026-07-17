@@ -5,3 +5,15 @@ __pycache__/
 
 # local credentials (import via --input)
 account.json
+
+# runtime dumps / stats / debug outputs
+drop_*.json
+last_*.json
+init_*.json
+battle_snapshot.json
+capture_summary.json
+run_log.txt
+
+# local capture dumps (users provide their own via --input)
+*.chlsj
+*.chls
