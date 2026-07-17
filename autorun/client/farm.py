@@ -123,6 +123,16 @@ class FarmRunner:
 
         self.log = _tee
 
+    def _heartbeat_tick(self, *, force: bool = False) -> None:
+        """Mid-battle heartbeat check; global HeartbeatService also runs every 60s."""
+        try:
+            resp = self.session.ensure_heartbeat(60.0, force=force)
+            if resp is not None:
+                code = resp.get("_code", 0)
+                self.log(f"[*] heartbeat ok code={code}")
+        except Exception as exc:
+            self.log(f"[-] heartbeat failed: {exc}")
+
     def _frontier_from_info(self, info: dict | None = None) -> FarmTarget:
         info = info if info is not None else (self.session.battle_info or {})
         region = int(info.get("_region", self.config.region) or self.config.region)
@@ -210,6 +220,7 @@ class FarmRunner:
             region=target.region, stage=target.stage, sector=target.sector, repeat=target.repeat
         )
         self.state.set_status("battle")
+        self._heartbeat_tick()
         start = self.session.battle_start(
             region=target.region,
             stage=target.stage,
@@ -238,6 +249,7 @@ class FarmRunner:
         waves = _extract_spawn_waves(start.get("_spawnMobList") or {})
         self.log(f"[+] start ok waves={[(w, len(m)) for w, m in waves]}")
         for wave_no, mobs in waves:
+            self._heartbeat_tick()
             km = self.session.battle_kill_mob(
                 wave=wave_no,
                 mob_uid_list=mobs,
@@ -256,6 +268,7 @@ class FarmRunner:
                     raw_end=km,
                 )
 
+        self._heartbeat_tick()
         end = self.session.battle_end(
             region=target.region,
             reason=battle_api.REASON_CLEAR,
@@ -389,9 +402,9 @@ class FarmRunner:
         self.state.set_status("farming")
         i = 0
         stay_fail_streak = 0
-
         try:
             while infinite or i < self.config.count:
+                self._heartbeat_tick()
                 try:
                     result = self.run_one_clear(target)
                 except ApiError as exc:

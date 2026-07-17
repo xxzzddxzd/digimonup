@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -24,9 +25,57 @@ class GameSession:
     battle_info: dict = field(default_factory=dict)
     last_battle_start: dict = field(default_factory=dict)
     last_battle_end: dict = field(default_factory=dict)
+    last_heartbeat: dict = field(default_factory=dict)
+    last_heartbeat_at: float = 0.0
 
     def __post_init__(self) -> None:
         self.client = ApiClient(self.config)
+
+    def _set_data_no(self, data_no: str, *, persist: bool = True) -> None:
+        """Update runtime + account.json data_no (server content hash / serverDataNo)."""
+        data_no = str(data_no or "").strip()
+        if not data_no:
+            return
+        self.client.data_no = data_no
+        self.config.account.data_no = data_no
+        if not persist:
+            return
+        try:
+            from .account_store import load_account_file, save_account_file
+
+            saved = load_account_file() or {}
+            acc = dict(saved.get("account") or {})
+            # Prefer current in-memory account fields, then overlay data_no.
+            for k in (
+                "client_id", "device_id", "platform_user_id", "device_model",
+                "operating_system", "ad_id", "push_token", "is_guest", "country",
+                "store_region_code", "region_type", "preferred_server_num",
+                "capture_stage", "capture_sector", "capture_region",
+            ):
+                if k not in acc and hasattr(self.config.account, k):
+                    acc[k] = getattr(self.config.account, k)
+            acc["data_no"] = data_no
+            flat = dict(acc)
+            for k in ("base_url", "version", "unity_version", "accept_language"):
+                if k in saved:
+                    flat[k] = saved[k]
+                elif hasattr(self.config, k):
+                    flat[k] = getattr(self.config, k)
+            # Keep human-readable alias in meta.
+            flat["source_file"] = (saved.get("meta") or {}).get("source_file")
+            flat["public_uid"] = (saved.get("meta") or {}).get("public_uid") or self.auth_info.get("_publicUid")
+            path = save_account_file(flat)
+            # Also stamp meta.serverDataNo without clobbering other meta.
+            import json
+            from pathlib import Path as _P
+            p = _P(path)
+            doc = json.loads(p.read_text(encoding="utf-8"))
+            meta = dict(doc.get("meta") or {})
+            meta["serverDataNo"] = data_no
+            doc["meta"] = meta
+            p.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
 
     def bootstrap(self) -> dict:
         ver = account.app_version_check(self.client)
@@ -34,9 +83,7 @@ class GameSession:
         endpoint = ver.get("_serverEndpoint")
         if endpoint:
             self.client.base_url = endpoint.rstrip("/")
-        if ver.get("_dataVersion") is not None:
-            # data_no is content hash; keep capture value unless empty.
-            pass
+
         pk = account.get_public_key(self.client)
         self.public_key = pk.get("_publicKey")
         if not self.public_key:
@@ -48,11 +95,28 @@ class GameSession:
         self.encrypted_key = build_encrypted_key(self.public_key, hex_key, hex_iv)
 
         self.auth_info = account.auth(self.client, self.encrypted_key)
+
+        # Content hash rotated on server: -18003 데이터 번호가 일치하지 않습니다.
+        if self.auth_info.get("_code") == -18003:
+            details = self.auth_info.get("_details") or {}
+            server_no = None
+            if isinstance(details, dict):
+                server_no = details.get("serverDataNo") or details.get("_serverDataNo")
+            if server_no:
+                self._set_data_no(str(server_no), persist=True)
+                # Retry auth once with server dataNo (same AES key/iv is fine).
+                self.auth_info = account.auth(self.client, self.encrypted_key)
+
         session_key = self.auth_info.get("_sessionKey")
+        code = self.auth_info.get("_code", 0)
+        if code not in (0, None):
+            raise ApiError(
+                f"auth failed code={code} msg={self.auth_info.get('_message')} "
+                f"details={self.auth_info.get('_details')}",
+                body=self.auth_info,
+            )
         if not session_key:
             raise ApiError("auth failed: no sessionKey", body=self.auth_info)
-        if self.auth_info.get("_code", 0) not in (0, None):
-            raise ApiError(f"auth failed code={self.auth_info.get('_code')}", body=self.auth_info)
         self.client.set_session_key(session_key)
         return self.auth_info
 
@@ -84,7 +148,19 @@ class GameSession:
         return self.init_data
 
     def heartbeat(self) -> dict:
-        return account.heartbeat(self.client)
+        self.last_heartbeat = account.heartbeat(self.client)
+        self.last_heartbeat_at = time.time()
+        return self.last_heartbeat
+
+    def ensure_heartbeat(self, interval_sec: float = 60.0, *, force: bool = False) -> Optional[dict]:
+        """Send /api/account/heartbeat if interval elapsed (or force)."""
+        if not self.client.session_key or not self.client.hex_key:
+            return None
+        interval = max(0.0, float(interval_sec))
+        now = time.time()
+        if not force and self.last_heartbeat_at and (now - self.last_heartbeat_at) < interval:
+            return None
+        return self.heartbeat()
 
     def battle_start(
         self,
@@ -155,6 +231,8 @@ class GameSession:
         self.login_info = {}
         self.account_info = {}
         self.init_data = {}
+        self.last_heartbeat = {}
+        self.last_heartbeat_at = 0.0
         # keep battle_info only as a hint; reauth will overwrite from init-data
 
     def reauth_pipeline(self) -> dict:
@@ -172,6 +250,8 @@ class GameSession:
         servers = self.list_servers()
         self.login()
         self.init_game_data()
+        # Session is fresh; start heartbeat timer from now (send first HB on interval).
+        self.last_heartbeat_at = time.time()
         return {
             "auth": self.auth_info,
             "servers": servers,

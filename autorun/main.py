@@ -18,6 +18,7 @@ from client.farm import FarmConfig, FarmRunner, FarmTarget, _extract_spawn_waves
 from client.runtime_state import STATE
 from client.tui import FarmTUI
 from client.account_store import import_input_file, apply_account_to_config, load_account_file
+from client.heartbeat import HeartbeatService
 
 
 def _pick_stage(session: GameSession, args) -> tuple[int, int, int, int]:
@@ -118,6 +119,7 @@ def main() -> int:
         return 0
 
     session = GameSession()
+    hb: HeartbeatService | None = None
     # Auto-load local account.json if present.
     saved = load_account_file()
     if saved:
@@ -157,6 +159,11 @@ def main() -> int:
             )
         STATE.set_status("ready")
         STATE.add_event("login pipeline ok")
+
+        # Always keep a 60s heartbeat for any mode (farm / single / skip-battle).
+        hb = HeartbeatService(session, log=(print if not args.tui else STATE.add_event))
+        hb.start()
+        result["heartbeat"] = {"interval_sec": 60}
 
         # Defaults for bare `python3 main.py`:
         # TUI + infinite stay farm on current login frontier (only startable target).
@@ -279,6 +286,11 @@ def main() -> int:
         traceback.print_exc()
         return 1
     finally:
+        try:
+            if hb is not None:
+                hb.stop()
+        except Exception:
+            pass
         dump_path = Path(args.dump)
         dump_path.parent.mkdir(parents=True, exist_ok=True)
         dump_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

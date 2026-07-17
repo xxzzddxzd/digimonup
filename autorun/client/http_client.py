@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from typing import Callable, Optional
@@ -32,6 +33,7 @@ class ApiClient:
         self.log_enabled = log
         self._logger = logger or print
         self.state = STATE
+        self._lock = threading.RLock()
 
     def set_crypto(self, hex_key: str, hex_iv: str) -> None:
         self.hex_key = hex_key
@@ -57,6 +59,10 @@ class ApiClient:
         }
 
     def _post(self, path: str, body: dict) -> tuple[dict, float, str, int]:
+        with self._lock:
+            return self._post_unlocked(path, body)
+
+    def _post_unlocked(self, path: str, body: dict) -> tuple[dict, float, str, int]:
         url = path if path.startswith("http") else f"{self.base_url}{path}"
         self._log(f"=> POST {url}")
         if getattr(self, "state", None) is not None:

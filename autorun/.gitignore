@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 *.log
 .DS_Store
+
+# local credentials (import via --input)
+account.json
