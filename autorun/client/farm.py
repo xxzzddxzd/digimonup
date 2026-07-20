@@ -93,7 +93,7 @@ class FarmConfig:
     # Prefer server current progress if still on same stage.
     prefer_server_progress: bool = True
     # Stay on current startable frontier from login; follow server after clear.
-    # Note: server only accepts current frontier with repeat=0; previous stage/sector fails.
+    # Note: startable frontier uses server _stage/_sector/_repeat (NG+ uses _repeat>=1).
     stay: bool = False
     # On fail code < 0: wait then re-login and resume.
     recover_wait_sec: float = 60.0  # default for non-kick fails
@@ -138,8 +138,9 @@ class FarmRunner:
         region = int(info.get("_region", self.config.region) or self.config.region)
         stage = int(info.get("_stage", self.config.start_stage) or self.config.start_stage or 1)
         sector = max(1, int(info.get("_sector", self.config.start_sector) or self.config.start_sector or 1))
-        # Server only accepts the current frontier with repeat=0.
-        return FarmTarget(region=region, stage=stage, sector=sector, repeat=0)
+        # Use server frontier as-is (including NG+ _repeat).
+        repeat = int(info.get("_repeat", 0) or 0)
+        return FarmTarget(region=region, stage=stage, sector=sector, repeat=repeat)
 
     def refresh_frontier(self) -> FarmTarget:
         """Re-fetch init-data and return current startable frontier."""
@@ -153,7 +154,7 @@ class FarmRunner:
                 region=target.region,
                 stage=target.stage,
                 sector=target.sector,
-                repeat=0,
+                repeat=int(target.repeat or 0),
             )
         self.state.set_target(
             region=target.region, stage=target.stage, sector=target.sector, repeat=target.repeat
@@ -172,9 +173,10 @@ class FarmRunner:
         region = int(info.get("_region", self.config.region) or self.config.region)
 
         if self.config.stay:
-            # Only the current server frontier is startable (repeat must be 0).
+            # Only the current server frontier is startable.
             # Explicit --stage/--sector can override, but invalid targets are
             # auto-retargeted on -28002/-28003/-28004.
+            # NG+/二周目: server _repeat is required (0 fails with -28004).
             if self.config.prefer_server_progress and server_stage:
                 target = self._frontier_from_info(info)
             else:
@@ -182,17 +184,17 @@ class FarmRunner:
                     region=region,
                     stage=int(self.config.start_stage or server_stage or 1),
                     sector=max(1, int(self.config.start_sector or server_sector or 1)),
-                    repeat=0,
+                    repeat=int(server_repeat or 0),
                 )
             self._stay_target = FarmTarget(
                 region=target.region,
                 stage=target.stage,
                 sector=target.sector,
-                repeat=0,
+                repeat=int(target.repeat or 0),
             )
             self.log(
                 f"[*] stay mode lock stage={target.stage} sector={target.sector} "
-                f"region={target.region} repeat=0"
+                f"region={target.region} repeat={target.repeat}"
             )
             self.state.set_target(
                 region=target.region, stage=target.stage, sector=target.sector, repeat=target.repeat
@@ -208,7 +210,7 @@ class FarmRunner:
             # Prefer the only startable frontier when available.
             stage = server_stage
             sector = max(1, server_sector or 1)
-            repeat = 0
+            repeat = int(server_repeat or 0)
         return FarmTarget(region=region, stage=stage, sector=sector, repeat=repeat)
 
     def run_one_clear(self, target: FarmTarget) -> BattleDropResult:
@@ -302,20 +304,21 @@ class FarmRunner:
             return self.refresh_frontier()
         if target.stage <= self.config.min_stage and target.sector <= 1:
             return None
-        # Push mode: try previous sector/stage, but always with repeat=0 first.
+        # Push mode: try previous sector/stage on the same cycle (_repeat).
         # If previous content is not startable, invalid-progress retarget will fix it.
+        rep = int(target.repeat or 0)
         if target.sector > 1:
             return FarmTarget(
                 region=target.region,
                 stage=target.stage,
                 sector=target.sector - 1,
-                repeat=0,
+                repeat=rep,
             )
         return FarmTarget(
             region=target.region,
             stage=target.stage - 1,
             sector=1,
-            repeat=0,
+            repeat=rep,
         )
 
     def _advance_target(self, target: FarmTarget, result: BattleDropResult) -> FarmTarget:
@@ -325,19 +328,22 @@ class FarmRunner:
                 region=int(after.get("_region", target.region) or target.region),
                 stage=int(after.get("_stage", target.stage) or target.stage),
                 sector=max(1, int(after.get("_sector", target.sector) or target.sector)),
-                repeat=0,
+                repeat=int(after.get("_repeat", target.repeat) or 0),
             )
         else:
             nxt = FarmTarget(
                 region=target.region,
                 stage=target.stage,
                 sector=target.sector,
-                repeat=0,
+                repeat=int(target.repeat or 0),
             )
         if self.config.stay:
             # Server advances after Clear; re-lock to the new startable frontier.
             self._stay_target = FarmTarget(
-                region=nxt.region, stage=nxt.stage, sector=nxt.sector, repeat=0
+                region=nxt.region,
+                stage=nxt.stage,
+                sector=nxt.sector,
+                repeat=int(nxt.repeat or 0),
             )
         return nxt
 

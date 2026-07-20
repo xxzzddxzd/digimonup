@@ -1,4 +1,3 @@
 #!/bin/zsh
-# Compatibility wrapper: old keepalive replaced by hourly one-shot auto.
-# Calling this now runs a single auto if not already running.
-exec /Users/xuzhengda/Documents/workspace/smbb/autorun/run_auto.sh
+# Compatibility: old keepalive → hourly one-shot outside Documents.
+exec /Users/xuzhengda/cron-jobs/run_smbb_auto.sh

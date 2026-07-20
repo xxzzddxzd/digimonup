@@ -1,6 +1,6 @@
 # autorun
 
-DIGIMON UP 自动推图。
+DIGIMON UP 自动推图 / 维护。
 
 ## 安装
 
@@ -25,49 +25,38 @@ python3 main.py runloop
 
 TUI + 无限刷当前可打关卡。`Ctrl+C` 停止。
 
-若执行中被手机顶号（`-19006`）：等待 10 分钟 → 全量重登 → 继续完成 `qmd`+`afk`。
-
-
-## 领取 AFK 奖励
-
-```bash
-python3 main.py afk
-```
-
-登录后请求 `/api/afk/reward-list` → `/api/afk/reward`，并尝试 `/api/afk/ad-view`。
-
-## 亲密点触 / 喂养
-
-```bash
-python3 main.py qmd
-```
-
-流程：
-
-1. `collect-list` 读 `nextRelationExpTime`，未到则等待
-2. `relation-exp`（空 body）加亲密度经验
-3. 成功后冷却约 **20 分钟**（1200s），期间再点返回 `-24016`
-4. 有可领奖励时用 `relation-reward`，`_key` = 伙伴 baseKey
-
 ## 定时维护 auto
 
 ```bash
 python3 main.py auto
 ```
 
-单次执行后退出（由 crontab 每小时触发）：
+单次：登录 → 肉田 → 异次元 box → 亲密点触（冷却则跳过）→ AFK，然后退出。
 
-1. 登录
-2. 肉田维护（浇水/收获/种植）
-3. 异次元 box（领取 / 挂公开箱 / 攻击）
-4. 亲密点触（冷却中则跳过，不等待）
-5. AFK 领取
+### macOS crontab（推荐）
 
-结果：`logs/auto.log`、运行日志 `logs/auto_run.log`。
+cron **读不了** `~/Documents`（`Operation not permitted`），入口必须放在 Documents 外：
 
 ```bash
-# crontab 示例（每小时）
-0 * * * * /Users/xuzhengda/Documents/workspace/smbb/autorun/run_auto.sh
+# 1) 从终端同步代码+账号到 cron 副本（改代码后执行）
+./sync_cron_copy.sh
+
+# 2) 安装入口（只需一次）
+mkdir -p ~/cron-jobs
+cp install_cron_entry.sh ~/cron-jobs/run_smbb_auto.sh
+chmod +x ~/cron-jobs/run_smbb_auto.sh
+
+# 3) crontab
+0 * * * * /Users/xuzhengda/cron-jobs/run_smbb_auto.sh
 ```
 
+- 运行目录：`~/cron-jobs/smbb-autorun`
+- 日志：`~/cron-jobs/smbb-auto-cron.log`、`~/cron-jobs/smbb-autorun/logs/`
+- 改代码后务必再跑一次 `./sync_cron_copy.sh`
 
+## 其他
+
+```bash
+python3 main.py afk   # AFK 奖励
+python3 main.py qmd   # 亲密点触（未到冷却会等待）
+```
