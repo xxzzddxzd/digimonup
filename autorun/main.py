@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from client.account_store import apply_account_to_config, import_input_file, load_account_file
 from client.apis import afk as afk_api
 from client.partner_care import run_qmd
-from client.qmd_auto import run_qmdauto_loop
+from client.qmd_auto import run_auto_once
 from client.drops import parse_battle_end, reward_label, _list_of
 from client.farm import FarmConfig, FarmRunner
 from client.heartbeat import HeartbeatService
@@ -227,13 +227,18 @@ def cmd_qmd() -> int:
 
 
 
-def cmd_qmdauto() -> int:
-    """Loop: login -> query nextRelationExpTime -> sleep -> re-login -> qmd+afk."""
-    def make_session() -> GameSession:
-        return _load_session()
+def cmd_auto() -> int:
+    """One-shot: farm + dbox + qmd + afk. Schedule via crontab hourly."""
+    session_holder = {"s": None}
 
-    print("[*] qmdauto: driven by server nextRelationExpTime; Ctrl+C to stop")
-    return run_qmdauto_loop(make_session, log=print, http_log=True)
+    def make_session():
+        s = _load_session()
+        session_holder["s"] = s
+        return s
+
+    print("[*] auto: one-shot farm/dbox/qmd/afk (crontab hourly; no cooldown sleep)")
+    return run_auto_once(make_session, log=print, http_log=True)
+
 
 
 def cmd_runloop() -> int:
@@ -358,8 +363,8 @@ def main() -> int:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("runloop", "afk", "qmd", "qmdauto"),
-        help="runloop: auto farm; afk: AFK rewards; qmd: partner feed once; qmdauto: loop qmd+afk by cooldown",
+        choices=("runloop", "afk", "qmd", "auto"),
+        help="runloop: stage farm; afk: AFK rewards; qmd: partner feed once; auto: one-shot farm+dbox+qmd+afk",
     )
     args = parser.parse_args()
 
@@ -372,8 +377,8 @@ def main() -> int:
         return cmd_afk()
     if args.command == "qmd":
         return cmd_qmd()
-    if args.command == "qmdauto":
-        return cmd_qmdauto()
+    if args.command == "auto":
+        return cmd_auto()
 
     parser.print_help()
     print("\nExamples:")
@@ -381,7 +386,7 @@ def main() -> int:
     print("  python3 main.py runloop")
     print("  python3 main.py afk")
     print("  python3 main.py qmd")
-    print("  python3 main.py qmdauto")
+    print("  python3 main.py auto")
     return 2
 
 

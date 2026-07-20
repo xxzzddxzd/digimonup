@@ -15,14 +15,14 @@ matches=$(pgrep -fl 'main.py qmdauto' 2>/dev/null || true)
 if [[ -n "${matches}" ]]; then
   echo "[$(ts)] killing:" >> "$KILL_LOG"
   echo "$matches" >> "$KILL_LOG"
-  /bin/pkill -f '[m]ain.py qmdauto' 2>>"$KILL_LOG" || true
+  pkill -f '[m]ain.py qmdauto' 2>>"$KILL_LOG" || true
   for i in 1 2 3 4 5 6 7 8 9 10; do
     pgrep -f 'main.py qmdauto' >/dev/null 2>&1 || break
     sleep 1
   done
   if pgrep -f 'main.py qmdauto' >/dev/null 2>&1; then
     echo "[$(ts)] still alive, force kill -9" >> "$KILL_LOG"
-    /bin/pkill -9 -f '[m]ain.py qmdauto' 2>>"$KILL_LOG" || true
+    pkill -9 -f '[m]ain.py qmdauto' 2>>"$KILL_LOG" || true
     sleep 1
   fi
 else

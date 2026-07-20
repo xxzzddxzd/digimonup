@@ -14,7 +14,7 @@ fi
 echo "[$ts] killing:" >> "$LOG"
 echo "$matches" >> "$LOG"
 # -f match full cmdline; [m]ain prevents self-match
-/bin/pkill -f '[m]ain.py qmdauto' 2>>"$LOG"
+pkill -f '[m]ain.py qmdauto' 2>>"$LOG"
 rc=$?
 # pkill returns 1 when no process — treat as ok
 if [[ $rc -eq 1 ]]; then rc=0; fi

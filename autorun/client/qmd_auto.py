@@ -1,9 +1,8 @@
-"""Long-running qmd + afk loop driven by server nextRelationExpTime.
+"""One-shot maintenance: farm + dbox + qmd + afk.
 
-No heartbeat in this flow. Session kick (-19006) from API responses:
-wait, full re-login, then finish qmd+afk.
-
-Each attempt appends one local result line to logs/qmdauto.log.
+Scheduling is external (crontab hourly). No intimacy-cooldown sleep loop.
+No heartbeat. Session kick (-19006): wait then re-auth and finish once.
+Each run appends result lines to logs/auto.log.
 """
 from __future__ import annotations
 
@@ -16,7 +15,6 @@ from typing import Any, Callable, Optional
 from .apis import afk as afk_api
 from .apis import partner as partner_api
 from .partner_care import (
-    DEFAULT_COOLDOWN_SEC,
     extract_partner_collect,
     partner_from_payload,
     run_qmd,
@@ -25,12 +23,14 @@ from .partner_care import (
 from .session import GameSession
 from .farm_care import run_farm_maintain
 from .farm_care import SessionKicked as FarmSessionKicked
+from .dbox_care import run_dbox_care
+from .dbox_care import SessionKicked as DboxSessionKicked
 
 LogFn = Callable[[str], None]
 
 SESSION_KICK_CODE = -19006
-KICK_RECOVER_WAIT_SEC = 600.0  # same policy as runloop
-DEFAULT_RESULT_LOG = Path("logs") / "qmdauto.log"
+KICK_RECOVER_WAIT_SEC = 600.0
+DEFAULT_RESULT_LOG = Path("logs") / "auto.log"
 
 
 class SessionKicked(RuntimeError):
@@ -64,15 +64,13 @@ def _raise_if_kick(body: Any, where: str) -> None:
 def _append_result_log(
     path: Path,
     *,
-    cycle: int,
     result: str,
     detail: str = "",
     log: LogFn | None = None,
 ) -> None:
-    """Append one local result line: date time + cycle + result + detail."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        line = f"{_now_str()} cycle={cycle} result={result}"
+        line = f"{_now_str()} result={result}"
         if detail:
             line += f" {detail}"
         with path.open("a", encoding="utf-8") as f:
@@ -84,32 +82,13 @@ def _append_result_log(
             log(f"[!] write result log failed: {exc}")
 
 
-def _sleep_until(left_sec: float, *, label: str, log: LogFn, extra_buffer: float = 2.0) -> None:
-    """Sleep left_sec with periodic logs. Uses wall clock end time (no drift from work)."""
-    wait = max(0.0, float(left_sec)) + float(extra_buffer)
-    if wait <= 0:
-        return
-    end = time.time() + wait
-    log(f"[*] qmdauto sleep {wait:.0f}s ({label})")
-    while True:
-        left = end - time.time()
-        if left <= 0:
-            break
-        if left < 15 or int(left) % 60 < 5:
-            log(f"[*] qmdauto wait... {left:.0f}s")
-        time.sleep(min(5.0, left))
-    log("[*] qmdauto wake")
-
-
 def _login(session: GameSession, *, log: LogFn) -> float:
-    """Full login pipeline. Returns login wall time for server clock offset."""
     session.run_login_pipeline()
     log("[+] login pipeline ok")
     return time.time()
 
 
 def _care_status(session: GameSession, *, login_wall: float | None, log: LogFn):
-    """collect-list + status; raise SessionKicked on -19006."""
     cl = partner_api.collect_list(session.client)
     _raise_if_kick(cl, "collect-list")
     partner = partner_from_payload(cl)
@@ -117,7 +96,7 @@ def _care_status(session: GameSession, *, login_wall: float | None, log: LogFn):
         partners = extract_partner_collect(cl)
         partner = partners[0] if partners else None
     st = status_from_partner(partner, session, login_wall=login_wall)
-    log(f"[*] qmdauto status: {st.summary()}")
+    log(f"[*] qmd status: {st.summary()}")
     return st, cl
 
 
@@ -160,10 +139,10 @@ def _recover_session(
     where: str,
 ) -> tuple[GameSession, float]:
     log(
-        f"[!] session kick detected ({where}); "
-        f"sleep {KICK_RECOVER_WAIT_SEC:.0f}s then full re-auth and finish flow"
+        f"[!] recover triggered: session kick at {where}; "
+        f"sleep {KICK_RECOVER_WAIT_SEC:.0f}s then re-auth"
     )
-    _sleep_until(KICK_RECOVER_WAIT_SEC, label="kick recover", log=log, extra_buffer=0.0)
+    time.sleep(KICK_RECOVER_WAIT_SEC)
     session = make_session()
     session.client.log_enabled = http_log
     login_wall = _login(session, log=log)
@@ -171,36 +150,30 @@ def _recover_session(
 
 
 def _do_qmd_and_afk(
-    session: GameSession,
-    login_wall: float,
-    *,
-    log: LogFn,
+    session: GameSession, login_wall: float | None, *, log: LogFn
 ) -> tuple[dict, dict, Any]:
-    """Execute claim path when ready. Returns (care, afk, next_status)."""
     care = _run_qmd_checked(session, log=log)
     log(
-        f"[*] qmdauto qmd ok={care.get('ok')} "
-        f"cooldown={care.get('cooldown_sec')} err={care.get('error')}"
+        f"[*] auto qmd ok={care.get('ok')} "
+        f"code={(care.get('relation_exp') or {}).get('code')} "
+        f"err={care.get('error')}"
     )
-    time.sleep(1.0)
     afk = _run_afk(session, log=log)
     log(
-        f"[*] qmdauto afk done codes="
-        f"{[afk.get(k, {}).get('code') for k in ('reward_list', 'reward', 'ad_view')]}"
+        "[*] auto afk done codes="
+        f"{[(afk.get(k) or {}).get('code') for k in ('reward_list', 'reward', 'ad_view')]}"
     )
     st2, _ = _care_status(session, login_wall=login_wall, log=log)
-    log(f"[*] qmdauto next: {st2.summary()}")
     return care, afk, st2
 
 
 def _format_claim_detail(care: dict, afk: dict, st2: Any) -> str:
-    after = (care.get("after") or {}) if isinstance(care, dict) else {}
+    after = care.get("after") or {}
     parts = [
         f"qmd_ok={bool(care.get('ok'))}",
         f"qmd_code={(care.get('relation_exp') or {}).get('code')}",
         f"exp={after.get('exp_before')}->{after.get('exp_after')}",
         f"gained={after.get('exp_gained')}",
-        f"cooldown={care.get('cooldown_sec')}",
         f"afk_list={(afk.get('reward_list') or {}).get('code')}",
         f"afk_reward={(afk.get('reward') or {}).get('code')}",
         f"afk_ad={(afk.get('ad_view') or {}).get('code')}",
@@ -212,140 +185,149 @@ def _format_claim_detail(care: dict, afk: dict, st2: Any) -> str:
     return " ".join(str(p) for p in parts)
 
 
-def run_qmdauto_loop(
+def run_auto_once(
     make_session: Callable[[], GameSession],
     *,
     log: LogFn = print,
     http_log: bool = True,
     result_log_path: str | Path | None = None,
 ) -> int:
-    """Infinite loop (no heartbeat):
+    """Single run (crontab-friendly):
 
-    1) login -> query nextRelationExpTime
-    2) if cooling: sleep until next (offline)
-    3) re-login -> qmd + afk
-    4) query next again -> sleep -> loop
+    login -> farm -> dbox -> qmd(if ready, else skip) -> afk -> exit
 
-    On -19006: wait 600s, full re-login, finish qmd+afk.
-
-    Local result log (date/time + result) appends to logs/qmdauto.log.
+    No long sleep on intimacy cooldown. On -19006: wait 600s, re-login, finish once.
     """
     result_path = Path(result_log_path) if result_log_path else DEFAULT_RESULT_LOG
-    _append_result_log(
-        result_path,
-        cycle=0,
-        result="start",
-        detail=f"log={result_path}",
-        log=log,
-    )
+    _append_result_log(result_path, result="start", detail=f"log={result_path}", log=log)
 
-    cycle = 0
+    session = make_session()
+    session.client.log_enabled = http_log
+    login_wall: float | None = None
+    exit_code = 1
+
     try:
-        while True:
-            cycle += 1
-            log(f"===== qmdauto cycle={cycle} =====")
-            session = make_session()
-            session.client.log_enabled = http_log
-            login_wall: float | None = None
+        attempts = 0
+        while attempts < 3:
+            attempts += 1
             try:
-                login_wall = _login(session, log=log)
+                if login_wall is None:
+                    login_wall = _login(session, log=log)
 
-                while True:
-                    try:
-                        # 肉田: harvest ripe + plant empty unlocked plots
-                        try:
-                            farm = run_farm_maintain(session, login_wall=login_wall, log=log)
-                            _append_result_log(
-                                result_path,
-                                cycle=cycle,
-                                result="farm",
-                                detail=(
-                                    f"ok={farm.get('ok')} "
-                                    f"watered={len(farm.get('watered') or [])} "
-                                    f"harvested={len(farm.get('harvested') or [])} "
-                                    f"planted={len(farm.get('planted') or [])} "
-                                    f"skipped={len(farm.get('skipped') or [])} "
-                                    f"stock203={(farm.get('water_stock') or {}).get('203')}"
-                                ),
-                                log=log,
-                            )
-                        except FarmSessionKicked as fk:
-                            raise SessionKicked(fk.where, body=fk.body) from fk
+                # farm
+                try:
+                    farm = run_farm_maintain(session, login_wall=login_wall, log=log)
+                    _append_result_log(
+                        result_path,
+                        result="farm",
+                        detail=(
+                            f"ok={farm.get('ok')} "
+                            f"watered={len(farm.get('watered') or [])} "
+                            f"harvested={len(farm.get('harvested') or [])} "
+                            f"planted={len(farm.get('planted') or [])} "
+                            f"skipped={len(farm.get('skipped') or [])} "
+                            f"stock203={(farm.get('water_stock') or {}).get('203')}"
+                        ),
+                        log=log,
+                    )
+                except FarmSessionKicked as fk:
+                    raise SessionKicked(fk.where, body=fk.body) from fk
 
-                        st, _ = _care_status(session, login_wall=login_wall, log=log)
+                # dbox (deploy + attack lines inside)
+                try:
+                    dbox = run_dbox_care(session, login_wall=login_wall, log=log)
+                    _append_result_log(
+                        result_path,
+                        result="dbox",
+                        detail=(
+                            f"ok={dbox.get('ok')} "
+                            f"claimed={dbox.get('claimed_keys')} "
+                            f"rewards={len(dbox.get('rewards') or [])} "
+                            f"public={len(dbox.get('already_public') or [])}+"
+                            f"{len(dbox.get('reconnected') or [])}/"
+                            f"{len(dbox.get('reconnect_failed') or [])} "
+                            f"wins={dbox.get('wins')} fails={dbox.get('fails')} "
+                            f"eligible={dbox.get('eligible')} candidates={dbox.get('candidates')} "
+                            f"ovr={dbox.get('ovr_before')}->{dbox.get('ovr_after')} "
+                            f"skip={dbox.get('skipped_reason')}"
+                        ),
+                        log=log,
+                    )
+                except DboxSessionKicked as dk:
+                    raise SessionKicked(dk.where, body=dk.body) from dk
 
-                        if not st.ready:
-                            _append_result_log(
-                                result_path,
-                                cycle=cycle,
-                                result="cooling",
-                                detail=f"left={st.left_sec:.1f}s next={st.next_str}",
-                                log=log,
-                            )
-                            _sleep_until(st.left_sec, label=f"until {st.next_str}", log=log)
-                            break  # outer cycle: fresh login near ready time
+                # qmd: only claim if ready; never sleep until cooldown
+                st, _ = _care_status(session, login_wall=login_wall, log=log)
+                if not st.ready:
+                    _append_result_log(
+                        result_path,
+                        result="qmd_skip",
+                        detail=f"cooling left={st.left_sec:.1f}s next={st.next_str}",
+                        log=log,
+                    )
+                    log(f"[*] qmd skip (cooling) left={st.left_sec:.1f}s next={st.next_str}")
+                    afk = _run_afk(session, log=log)
+                    _append_result_log(
+                        result_path,
+                        result="afk",
+                        detail=(
+                            f"list={(afk.get('reward_list') or {}).get('code')} "
+                            f"reward={(afk.get('reward') or {}).get('code')} "
+                            f"ad={(afk.get('ad_view') or {}).get('code')}"
+                        ),
+                        log=log,
+                    )
+                else:
+                    care, afk, st2 = _do_qmd_and_afk(session, login_wall, log=log)
+                    _append_result_log(
+                        result_path,
+                        result="ok" if care.get("ok") else "qmd_fail",
+                        detail=_format_claim_detail(care, afk, st2),
+                        log=log,
+                    )
 
-                        care, afk, st2 = _do_qmd_and_afk(session, login_wall, log=log)
-                        detail = _format_claim_detail(care, afk, st2)
-                        _append_result_log(
-                            result_path,
-                            cycle=cycle,
-                            result="ok" if care.get("ok") else "qmd_fail",
-                            detail=detail,
-                            log=log,
-                        )
+                _append_result_log(result_path, result="done", log=log)
+                log("[+] auto done")
+                exit_code = 0
+                break
 
-                        if st2.ready and not care.get("ok"):
-                            log("[!] ready but qmd failed; sleep 60s then retry")
-                            _sleep_until(60.0, label="retry backoff", log=log, extra_buffer=0.0)
-                            session = make_session()
-                            session.client.log_enabled = http_log
-                            login_wall = _login(session, log=log)
-                            continue
-
-                        left = st2.left_sec
-                        if left <= 0:
-                            left = float(care.get("cooldown_sec") or DEFAULT_COOLDOWN_SEC)
-                            log(f"[*] qmdauto fallback sleep {left:.0f}s")
-                        _sleep_until(left, label=f"until {st2.next_str}", log=log)
-                        break
-                    except SessionKicked as kick:
-                        _append_result_log(
-                            result_path,
-                            cycle=cycle,
-                            result="kicked",
-                            detail=f"where={kick.where} wait={KICK_RECOVER_WAIT_SEC:.0f}s",
-                            log=log,
-                        )
-                        session, login_wall = _recover_session(
-                            make_session,
-                            log=log,
-                            http_log=http_log,
-                            where=kick.where,
-                        )
-                        continue
-            except KeyboardInterrupt:
-                raise
-            except Exception as exc:
-                log(f"[-] qmdauto cycle error: {exc}")
-                log(traceback.format_exc())
-                msg = str(exc)
-                wait = KICK_RECOVER_WAIT_SEC if "19006" in msg else 60.0
+            except SessionKicked as kick:
                 _append_result_log(
                     result_path,
-                    cycle=cycle,
-                    result="error",
-                    detail=f"err={exc} wait={wait:.0f}s",
+                    result="kicked",
+                    detail=f"where={kick.where} wait={KICK_RECOVER_WAIT_SEC:.0f}s attempt={attempts}",
                     log=log,
                 )
-                _sleep_until(wait, label=f"error recover ({wait:.0f}s)", log=log, extra_buffer=0.0)
+                session, login_wall = _recover_session(
+                    make_session, log=log, http_log=http_log, where=kick.where
+                )
+                continue
+            except Exception as exc:
+                log(f"[-] auto error: {exc}")
+                log(traceback.format_exc())
+                msg = str(exc)
+                wait = KICK_RECOVER_WAIT_SEC if "19006" in msg else 30.0
+                _append_result_log(
+                    result_path,
+                    result="error",
+                    detail=f"{type(exc).__name__}: {exc} wait={wait:.0f}s",
+                    log=log,
+                )
+                if "19006" in msg and attempts < 3:
+                    time.sleep(wait)
+                    session = make_session()
+                    session.client.log_enabled = http_log
+                    login_wall = None
+                    continue
+                break
+
     except KeyboardInterrupt:
-        _append_result_log(
-            result_path,
-            cycle=cycle,
-            result="stopped",
-            detail="KeyboardInterrupt",
-            log=log,
-        )
-        log("[*] qmdauto stopped by user")
-        return 0
+        _append_result_log(result_path, result="stopped", detail="KeyboardInterrupt", log=log)
+        log("[*] auto stopped by user")
+        exit_code = 130
+
+    return exit_code
+
+
+# backward-compatible alias
+run_qmdauto_loop = run_auto_once

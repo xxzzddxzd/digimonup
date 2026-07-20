@@ -49,25 +49,25 @@ python3 main.py qmd
 3. 成功后冷却约 **20 分钟**（1200s），期间再点返回 `-24016`
 4. 有可领奖励时用 `relation-reward`，`_key` = 伙伴 baseKey
 
-## 亲密点触自动循环
+## 定时维护 auto
 
 ```bash
-python3 main.py qmdauto
+python3 main.py auto
 ```
 
-流程（循环）：
+单次执行后退出（由 crontab 每小时触发）：
 
-1. 登录，读 `nextRelationExpTime`
-2. 未到点则下线并 sleep 到点（按服务器时间，不靠固定 21 分钟）
-3. 重新登录，维护肉田（可收则收、空地种植）+ 执行 `qmd` + `afk`
-4. 再读下次时间，继续 sleep
+1. 登录
+2. 肉田维护（浇水/收获/种植）
+3. 异次元 box（领取 / 挂公开箱 / 攻击）
+4. 亲密点触（冷却中则跳过，不等待）
+5. AFK 领取
 
-本流程**不开心跳**；仅在业务请求返回 `-19006` 时重登恢复。
+结果：`logs/auto.log`、运行日志 `logs/auto_run.log`。
 
-结果写入 `logs/qmdauto.log`（日期时间 + 当次结果）。
-
-`Ctrl+C` 停止。
-
-若执行中被手机顶号（`-19006`）：等待 10 分钟 → 全量重登 → 继续完成 `qmd`+`afk`。
+```bash
+# crontab 示例（每小时）
+0 * * * * /Users/xuzhengda/Documents/workspace/smbb/autorun/run_auto.sh
+```
 
 
