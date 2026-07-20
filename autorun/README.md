@@ -23,7 +23,7 @@ python3 main.py --input 你的抓包.chlsj
 | --- | --- |
 | `python3 main.py --input FILE` | 从 Charles `.chlsj` / 抓包 JSON 导入账号 |
 | `python3 main.py runloop` | TUI 无限刷当前可打关卡 |
-| `python3 main.py auto` | 单次维护：肉田 → 异次元 box → 亲密点触 → AFK |
+| `python3 main.py auto` | 单次维护：肉田 → 训练 → 异次元 box → 亲密点触 → AFK |
 
 无参数时打印 help 与示例。
 
@@ -45,9 +45,10 @@ python3 main.py auto
 
 1. 登录
 2. 肉田维护（浇水等）
-3. 异次元 box：领取红点 → 续上自己 box + 公开 box → 按规则攻击
-4. 亲密点触（冷却中则跳过，不长等）
-5. AFK 领取
+3. 训练 / Lab：有完成项则领取 → 重开同一训练 → 请求大家帮助
+4. 异次元 box：领取红点 → 续上自己 box + 公开 box → 按规则攻击
+5. 亲密点触（冷却中则跳过，不长等）
+6. AFK 领取
 
 结果追加到 `logs/auto.log`。遇会话踢出 `-19006` 会等待后重登并再跑完一轮。
 

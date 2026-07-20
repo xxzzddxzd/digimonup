@@ -23,6 +23,8 @@ from .partner_care import (
 from .session import GameSession
 from .farm_care import run_farm_maintain
 from .farm_care import SessionKicked as FarmSessionKicked
+from .lab_care import run_lab_care
+from .lab_care import SessionKicked as LabSessionKicked
 from .dbox_care import run_dbox_care
 from .dbox_care import SessionKicked as DboxSessionKicked
 
@@ -194,7 +196,7 @@ def run_auto_once(
 ) -> int:
     """Single run (crontab-friendly):
 
-    login -> farm -> dbox -> qmd(if ready, else skip) -> afk -> exit
+    login -> farm -> lab -> dbox -> qmd(if ready, else skip) -> afk -> exit
 
     No long sleep on intimacy cooldown. On -19006: wait 600s, re-login, finish once.
     """
@@ -232,6 +234,25 @@ def run_auto_once(
                     )
                 except FarmSessionKicked as fk:
                     raise SessionKicked(fk.where, body=fk.body) from fk
+
+                # lab / 训练: complete finished run, restart same key, ask camp help
+                try:
+                    lab = run_lab_care(session, login_wall=login_wall, log=log)
+                    _append_result_log(
+                        result_path,
+                        result="lab",
+                        detail=(
+                            f"ok={lab.get('ok')} "
+                            f"completed={lab.get('completed_key')} "
+                            f"ran={lab.get('ran_key')} "
+                            f"helped={lab.get('helped')} "
+                            f"skip={lab.get('skipped_reason')} "
+                            f"errors={len(lab.get('errors') or [])}"
+                        ),
+                        log=log,
+                    )
+                except LabSessionKicked as lk:
+                    raise SessionKicked(lk.where, body=lk.body) from lk
 
                 # dbox (deploy + attack lines inside)
                 try:
