@@ -17,3 +17,7 @@ run_log.txt
 # local capture dumps (users provide their own via --input)
 *.chlsj
 *.chls
+
+# runtime
+logs/
+*.pid

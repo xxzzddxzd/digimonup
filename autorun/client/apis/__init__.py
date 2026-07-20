@@ -1,3 +1,3 @@
-from . import account, battle, misc
+from . import account, afk, battle, farm, misc, partner
 
-__all__ = ["account", "battle", "misc"]
+__all__ = ["account", "afk", "battle", "farm", "misc", "partner"]
