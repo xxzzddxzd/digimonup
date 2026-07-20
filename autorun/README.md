@@ -52,6 +52,30 @@ python3 main.py auto
 
 结果追加到 `logs/auto.log`。遇会话踢出 `-19006` 会等待后重登并再跑完一轮。
 
+
+## 训练配置
+
+手动编辑 `lab_config.json`（与 `main.py` 同目录）：
+
+```json
+{
+  "default_max_level": 5,
+  "max_level": {
+    "4": 1,
+    "8": 1,
+    "11": 10,
+    "12": 10
+  },
+  "priority": [11, 12, 4, 8, 1, 2, 3, 5, 6, 7, 9, 10]
+}
+```
+
+- `max_level`：每个训练点 `_key` 的等级上限（满级后 auto 会换下一个）
+- `priority`：选下一点时的优先顺序
+- `default_max_level`：未写明的 key 默认上限
+
+改完后若走 cron，再执行一次 `./sync_cron_copy.sh`。
+
 ## 辅助脚本
 
 | 脚本 | 作用 |
