@@ -24,8 +24,6 @@ python3 main.py --input 你的抓包.chlsj
 | `python3 main.py --input FILE` | 从 Charles `.chlsj` / 抓包 JSON 导入账号 |
 | `python3 main.py runloop` | TUI 无限刷当前可打关卡 |
 | `python3 main.py auto` | 单次维护：肉田 → 异次元 box → 亲密点触 → AFK |
-| `python3 main.py afk` | 只领 AFK 奖励（含广告加成，失败忽略） |
-| `python3 main.py qmd` | 只做亲密点触（未到冷却会等待） |
 
 无参数时打印 help 与示例。
 
@@ -52,13 +50,6 @@ python3 main.py auto
 5. AFK 领取
 
 结果追加到 `logs/auto.log`。遇会话踢出 `-19006` 会等待后重登并再跑完一轮。
-
-### 单独子任务
-
-```bash
-python3 main.py afk
-python3 main.py qmd
-```
 
 ## 辅助脚本
 

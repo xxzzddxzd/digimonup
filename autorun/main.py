@@ -12,10 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from client.account_store import apply_account_to_config, import_input_file, load_account_file
-from client.apis import afk as afk_api
-from client.partner_care import run_qmd
 from client.qmd_auto import run_auto_once
-from client.drops import parse_battle_end, reward_label, _list_of
 from client.farm import FarmConfig, FarmRunner
 from client.heartbeat import HeartbeatService
 from client.runtime_state import STATE
@@ -44,187 +41,6 @@ def cmd_import(input_path: str) -> int:
         f"server={imported.get('preferred_server_num')}"
     )
     return 0
-
-
-
-def _summarize_rewards(payload: dict) -> list[str]:
-    """Best-effort human labels from AFK / reward payloads."""
-    labels: list[str] = []
-    if not isinstance(payload, dict):
-        return labels
-
-    # Common containers: _rewardAllList, _pendingRewardList, nested _list
-    candidates = []
-    for key in ("_rewardAllList", "rewardAllList", "_pendingRewardList", "pendingRewardList"):
-        if key in payload:
-            candidates.append(payload.get(key))
-    afk = payload.get("_afk") or payload.get("afk")
-    if isinstance(afk, dict):
-        for key in ("_pendingRewardList", "pendingRewardList", "_rewardList", "rewardList"):
-            if key in afk:
-                candidates.append(afk.get(key))
-        # sometimes rewards are nested lists of RewardInfoParam
-        for key in ("_baseRewardList", "_additionalRewardList"):
-            if key in afk:
-                candidates.append(afk.get(key))
-
-    def walk(node):
-        if isinstance(node, list):
-            for it in node:
-                walk(it)
-            return
-        if not isinstance(node, dict):
-            return
-        # RewardInfoParam-like
-        if any(k in node for k in ("_rewardType", "rewardType", "_type")) and any(
-            k in node for k in ("_count", "count", "_value", "value")
-        ):
-            rtype = node.get("_rewardType", node.get("rewardType", node.get("_type", 0)))
-            value = node.get("_value", node.get("value", node.get("_goodsType", 0)))
-            count = node.get("_count", node.get("count", 1))
-            try:
-                labels.append(f"{reward_label(int(rtype), value)}x{int(count)}")
-            except Exception:
-                labels.append(str(node))
-            return
-        for v in node.values():
-            if isinstance(v, (dict, list)):
-                walk(v)
-
-    for c in candidates:
-        walk(c)
-    # fallback walk whole payload shallowly for reward items
-    if not labels:
-        walk(payload)
-    return labels
-
-
-def _print_afk_state(tag: str, body: dict) -> None:
-    code = body.get("_code", 0)
-    print(f"[*] {tag} code={code} msg={body.get('_message')}")
-    afk = body.get("_afk") if isinstance(body.get("_afk"), dict) else {}
-    if afk:
-        print(
-            f"    afk count={afk.get('_rewardIntervalCount', afk.get('count'))} "
-            f"adCount={afk.get('_adCount', afk.get('adCount'))} "
-            f"lastRewardTime={afk.get('_lastRewardTime', afk.get('lastObtainTime'))}"
-        )
-    labels = _summarize_rewards(body)
-    if labels:
-        # unique preserve order
-        seen = set()
-        uniq = []
-        for x in labels:
-            if x not in seen:
-                seen.add(x)
-                uniq.append(x)
-        print("    rewards:", ", ".join(uniq[:40]) + (" ..." if len(uniq) > 40 else ""))
-    else:
-        # short key dump for debugging empty claims
-        keys = list(body.keys()) if isinstance(body, dict) else []
-        print("    keys:", keys)
-
-
-def cmd_afk() -> int:
-    """Login then query + claim AFK rewards (/api/afk/*)."""
-    session = _load_session()
-    session.client.log_enabled = True
-    hb = None
-    result: dict = {"ok": False, "mode": "afk"}
-    try:
-        pipe = session.run_login_pipeline()
-        result["login_pipeline"] = {
-            "session_key": session.client.session_key,
-            "public_uid": session.auth_info.get("_publicUid"),
-            "battle_info": session.battle_info,
-            "init_keys": pipe.get("init_keys"),
-        }
-        print("[+] login pipeline ok")
-        hb = HeartbeatService(session, log=print)
-        hb.start()
-
-        listed = afk_api.reward_list(session.client)
-        result["reward_list"] = listed
-        _print_afk_state("afk/reward-list", listed)
-        if listed.get("_code", 0) not in (0, None):
-            raise RuntimeError(
-                f"afk/reward-list failed code={listed.get('_code')} msg={listed.get('_message')}"
-            )
-
-        obtained = afk_api.reward_obtain(session.client)
-        result["reward"] = obtained
-        _print_afk_state("afk/reward", obtained)
-        if obtained.get("_code", 0) not in (0, None):
-            raise RuntimeError(
-                f"afk/reward failed code={obtained.get('_code')} msg={obtained.get('_message')}"
-            )
-
-        # Optional ad bonus — ignore soft fail (no ad left / daily cap).
-        ad = afk_api.ad_view(session.client)
-        result["ad_view"] = ad
-        _print_afk_state("afk/ad-view", ad)
-
-        result["ok"] = True
-        print("[+] afk done")
-        return 0
-    except Exception as exc:
-        result["error"] = str(exc)
-        result["trace"] = traceback.format_exc()
-        print("[-] FAILED:", exc)
-        traceback.print_exc()
-        return 1
-    finally:
-        try:
-            if hb is not None:
-                hb.stop()
-        except Exception:
-            pass
-        Path(DUMP_PATH).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[*] wrote {DUMP_PATH}")
-
-
-
-def cmd_qmd() -> int:
-    """Partner care: wait cooldown if needed, relation-exp, then relation-reward."""
-    session = _load_session()
-    session.client.log_enabled = True
-    hb = None
-    result: dict = {"ok": False, "mode": "qmd"}
-    try:
-        pipe = session.run_login_pipeline()
-        result["login_pipeline"] = {
-            "session_key": session.client.session_key,
-            "public_uid": session.auth_info.get("_publicUid"),
-            "server_time": (session.login_info or {}).get("_serverTime"),
-            "battle_info": session.battle_info,
-        }
-        print("[+] login pipeline ok")
-        hb = HeartbeatService(session, log=print)
-        hb.start()
-
-        care = run_qmd(session, wait_cooldown=True, log=print)
-        result["care"] = care
-        result["ok"] = bool(care.get("ok"))
-        if result["ok"]:
-            print("[+] qmd done")
-            return 0
-        print("[-] qmd incomplete")
-        return 1
-    except Exception as exc:
-        result["error"] = str(exc)
-        result["trace"] = traceback.format_exc()
-        print("[-] FAILED:", exc)
-        traceback.print_exc()
-        return 1
-    finally:
-        try:
-            if hb is not None:
-                hb.stop()
-        except Exception:
-            pass
-        Path(DUMP_PATH).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[*] wrote {DUMP_PATH}")
-
 
 
 def cmd_auto() -> int:
@@ -363,8 +179,8 @@ def main() -> int:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("runloop", "afk", "qmd", "auto"),
-        help="runloop: stage farm; afk: AFK rewards; qmd: partner feed once; auto: one-shot farm+dbox+qmd+afk",
+        choices=("runloop", "auto"),
+        help="runloop: stage farm; auto: one-shot farm+dbox+qmd+afk",
     )
     args = parser.parse_args()
 
@@ -373,10 +189,6 @@ def main() -> int:
 
     if args.command == "runloop":
         return cmd_runloop()
-    if args.command == "afk":
-        return cmd_afk()
-    if args.command == "qmd":
-        return cmd_qmd()
     if args.command == "auto":
         return cmd_auto()
 
@@ -384,8 +196,6 @@ def main() -> int:
     print("\nExamples:")
     print("  python3 main.py --input capture.chlsj")
     print("  python3 main.py runloop")
-    print("  python3 main.py afk")
-    print("  python3 main.py qmd")
     print("  python3 main.py auto")
     return 2
 
