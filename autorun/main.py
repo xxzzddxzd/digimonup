@@ -180,7 +180,7 @@ def main() -> int:
         "command",
         nargs="?",
         choices=("runloop", "auto"),
-        help="runloop: stage farm; auto: one-shot farm+dbox+qmd+afk",
+        help="runloop: stage farm; auto: one-shot farm+lab+mine+dbox+qmd+afk",
     )
     args = parser.parse_args()
 

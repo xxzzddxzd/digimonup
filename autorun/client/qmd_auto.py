@@ -25,6 +25,8 @@ from .farm_care import run_farm_maintain
 from .farm_care import SessionKicked as FarmSessionKicked
 from .lab_care import run_lab_care
 from .lab_care import SessionKicked as LabSessionKicked
+from .mine_care import run_mine_care
+from .mine_care import SessionKicked as MineSessionKicked
 from .dbox_care import run_dbox_care
 from .dbox_care import SessionKicked as DboxSessionKicked
 
@@ -196,7 +198,7 @@ def run_auto_once(
 ) -> int:
     """Single run (crontab-friendly):
 
-    login -> farm -> lab -> dbox -> qmd(if ready, else skip) -> afk -> exit
+    login -> farm -> lab -> mine -> dbox -> qmd(if ready, else skip) -> afk -> exit
 
     No long sleep on intimacy cooldown. On -19006: wait 600s, re-login, finish once.
     """
@@ -253,6 +255,25 @@ def run_auto_once(
                     )
                 except LabSessionKicked as lk:
                     raise SessionKicked(lk.where, body=lk.body) from lk
+
+                # mine / 探查: spend stamina, pick chips, distance rewards
+                try:
+                    mine = run_mine_care(session, login_wall=login_wall, log=log)
+                    _append_result_log(
+                        result_path,
+                        result="mine",
+                        detail=(
+                            f"ok={mine.get('ok')} "
+                            f"moves={mine.get('moves')} dashes={mine.get('dashes')} "
+                            f"drills={mine.get('drills')} chips~={mine.get('chips')} "
+                            f"stamina={mine.get('stamina_start')}->{mine.get('stamina_end')} "
+                            f"distClaim={mine.get('distance_claimed')} "
+                            f"skip={mine.get('skipped_reason')}"
+                        ),
+                        log=log,
+                    )
+                except MineSessionKicked as mk:
+                    raise SessionKicked(mk.where, body=mk.body) from mk
 
                 # dbox (deploy + attack lines inside)
                 try:
