@@ -230,17 +230,21 @@ def _item_options(item: dict) -> list[dict]:
     return [o for o in opts if isinstance(o, dict)] if isinstance(opts, list) else []
 
 
-def _option_score(opts: list[dict]) -> tuple[float, float, int]:
-    """(sum_value, sum_grade, option_count) — higher is better."""
+def _option_score(opts: list[dict]) -> tuple[float, float, int, int]:
+    """(sum_value, sum_grade, option_count, max_grade) — higher is better."""
     total_v = 0.0
     total_g = 0.0
+    max_g = 0
     for o in opts:
         try:
             total_v += float(o.get("_value", o.get("value") or 0))
         except Exception:
             pass
-        total_g += float(_int(o.get("_grade", o.get("grade")), 0))
-    return (total_v, total_g, len(opts))
+        g = _int(o.get("_grade", o.get("grade")), 0)
+        total_g += float(g)
+        if g > max_g:
+            max_g = g
+    return (total_v, total_g, len(opts), max_g)
 
 
 def item_score(item: dict) -> tuple:
@@ -248,11 +252,12 @@ def item_score(item: dict) -> tuple:
 
     Hologram value is mostly in random options; prefer quality over raw level
     so a high-lv trash 1-opt piece does not beat a lower-lv multi high-grade piece.
-      option_count > option grade sum > option value sum > level > key
+      option_count > max option grade > option grade sum > option value sum > level > key
     """
-    ov, og, oc = _option_score(_item_options(item))
+    ov, og, oc, max_g = _option_score(_item_options(item))
     return (
         oc,
+        max_g,
         og,
         ov,
         _item_level(item),
@@ -261,8 +266,24 @@ def item_score(item: dict) -> tuple:
 
 
 def is_better_item(new_item: dict, cur_item: dict | None) -> bool:
+    """True only if new is strictly better under conservative hologram rules.
+
+    Hard gates (never equip if either fails):
+      1) option count must be >= current
+      2) max option grade must be >= current
+    Then require full item_score tuple strictly greater.
+    """
     if cur_item is None:
         return True
+    n_opts = _item_options(new_item)
+    c_opts = _item_options(cur_item)
+    n_v, n_g, n_c, n_max = _option_score(n_opts)
+    c_v, c_g, c_c, c_max = _option_score(c_opts)
+    # Hard: fewer lines or lower peak rarity → always worse (blocks SR trash vs LR/GR)
+    if n_c < c_c:
+        return False
+    if n_max < c_max:
+        return False
     return item_score(new_item) > item_score(cur_item)
 
 
@@ -507,11 +528,11 @@ def _format_item_short(item: dict | None) -> str:
     if not item:
         return "none"
     opts = _item_options(item)
-    ov, og, oc = _option_score(opts)
+    ov, og, oc, max_g = _option_score(opts)
     return (
         f"uid={_item_uid(item)[:8]}… type={_item_type(item)} "
         f"lv={_item_level(item)} key={_item_key(item)} "
-        f"opts={oc} val={ov:.4f} gradeSum={og:.0f}"
+        f"opts={oc} maxG={max_g} val={ov:.4f} gradeSum={og:.0f}"
     )
 
 
