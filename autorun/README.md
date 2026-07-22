@@ -24,8 +24,26 @@ python3 main.py --input 你的抓包.chlsj
 | `python3 main.py --input FILE` | 从 Charles `.chlsj` / 抓包 JSON 导入账号 |
 | `python3 main.py runloop` | TUI 无限刷当前可打关卡 |
 | `python3 main.py auto` | 单次维护：肉田 → 训练 → 探查 → 异次元 box → 亲密点触 → AFK |
+| `python3 main.py ts` | **数码世界 / 探索** Textual 交互 TUI：鼠标点格行走 / 钻头 / 冲锋 / 领里程（`mine` 为别名） |
+| `python3 main.py zb` | **开装备**：spawn-and-sell（默认每批 8）；`--info` 看炉子快照 |
 
-无参数时打印 help 与示例。
+无参数时打印 help 与示例。需要 `ts` 时请安装依赖：`pip install -r requirements.txt`（含 `textual`）。
+
+### 数码世界交互 ts
+
+```bash
+python3 main.py ts
+```
+
+登录后进入 Textual 界面：
+
+- **点击空地/道具**：在合法范围内行走（col±1 或 row±1）
+- **点击岩石**：合法范围内默认使用钻头（无需开关；无钻头会提示）
+- **冲锋 [f]**：同 lane 向更深 row+3（消耗冲锋）
+- **领里程 [c]**：尝试领取距离里程奖励
+- **刷新 [r]** / **退出 [q]**（`[d]` 钻头模式开关已可选，点岩默认即钻）
+
+`auto` 里的自动探查逻辑不变；`ts` 仅手动游玩。
 
 ### 自动推图
 
@@ -48,11 +66,24 @@ python3 main.py auto
 3. 训练 / Lab：有完成项则领取 → 重开同一训练 → 请求大家帮助
 4. 探查数码世界 / Mine：耗尽体力捡特训芯片，可冲锋/钻头，尝试里程奖励
 5. 异次元 box：领取红点 → 续上自己 box + 公开 box → 按规则攻击
-6. 亲密点触（冷却中则跳过，不长等）
+6. 亲密点触：遍历 **所有伙伴**（各自独立冷却）；就绪的先 `change-character` 再 `relation-exp`；全冷却则跳过，不长等
 7. AFK 领取
 
 结果追加到 `logs/auto.log`。遇会话踢出 `-19006` 会等待后重登并再跑完一轮。
 
+
+
+### 开装备 zb
+
+```bash
+python3 main.py zb              # 开 1 批装备（数量=当前炉子 SpawnCount，lv17=8）
+python3 main.py zb --batches 5  # 连续 5 批
+python3 main.py zb --info       # 只查炉子快照 / 升级所需 bit（不操作）
+```
+
+开装备走 `POST /api/item/spawn-and-sell`。炉子维护（查 info / 投 bit / 满了建造 / 建造完成）在 `auto` 里由 `run_item_spawner_care` 自动跑，不进 `zb`。
+
+本地表：`item_spawner_table.json`。剩余 bit = `Gold * (GoldCount - _count)`。
 
 ## 训练配置
 
@@ -74,38 +105,24 @@ python3 main.py auto
 - `priority`：选下一点时的优先顺序
 - `default_max_level`：未写明的 key 默认上限
 
-改完后若走 cron，再执行一次 `./sync_cron_copy.sh`。
-
 ## 辅助脚本
 
 | 脚本 | 作用 |
 | --- | --- |
-| `./sync_cron_copy.sh` | 把本目录同步到 `~/cron-jobs/smbb-autorun`（改代码后跑） |
-| `./install_cron_entry.sh` | cron 入口模板：在 Documents 外跑 `main.py auto` |
-| `./run_auto.sh` | 先 sync（可读时）再执行 Documents 外入口 |
+| `./run_auto.sh` | 在本目录执行一次 `main.py auto` |
+| `./install_cron_entry.sh` | 同上（带 skip-if-running + cron 日志） |
 | `./kill_auto.sh` | 只杀 `main.py auto` / 旧 `qmdauto` |
-| `./ensure_qmdauto.sh` | 兼容旧 keepalive，转调 hourly 入口 |
+| `./ensure_qmdauto.sh` | 兼容旧名，转调本目录 auto |
 
-## macOS crontab（推荐）
-
-cron **读不了** `~/Documents`（`Operation not permitted`），入口必须放在 Documents 外：
+## macOS crontab（与 dqsg 相同：直接跑本仓库）
 
 ```bash
-# 1) 从终端同步代码+账号到 cron 副本（改代码后执行）
-./sync_cron_copy.sh
-
-# 2) 安装入口（只需一次）
-mkdir -p ~/cron-jobs
-cp install_cron_entry.sh ~/cron-jobs/run_smbb_auto.sh
-chmod +x ~/cron-jobs/run_smbb_auto.sh
-
-# 3) crontab
-0 * * * * /Users/xuzhengda/cron-jobs/run_smbb_auto.sh
+# crontab -e 加一行（每小时）
+0 * * * * cd /Users/xuzhengda/Documents/workspace/smbb/autorun && /Users/xuzhengda/.pyenv/versions/3.12.8/bin/python3 main.py auto >> logs/auto_cron.log 2>&1
 ```
 
-- 运行目录：`~/cron-jobs/smbb-autorun`
-- 日志：`~/cron-jobs/smbb-auto-cron.log`、`~/cron-jobs/smbb-autorun/logs/`
-- 改代码后务必再跑一次 `./sync_cron_copy.sh`
+- 运行目录就是 `Documents/workspace/smbb/autorun`，**改代码后无需 sync**
+- 日志：`logs/auto.log`、`logs/auto_run.log`（若用 `install_cron_entry.sh`）、`logs/auto_cron.log`
 
 ## 本地文件
 

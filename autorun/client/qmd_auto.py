@@ -1,4 +1,4 @@
-"""One-shot maintenance: farm + dbox + qmd + afk.
+"""One-shot maintenance: farm + lab + mine + dbox + furnace + qmd + afk.
 
 Scheduling is external (crontab hourly). No intimacy-cooldown sleep loop.
 No heartbeat. Session kick (-19006): wait then re-auth and finish once.
@@ -16,9 +16,9 @@ from .apis import afk as afk_api
 from .apis import partner as partner_api
 from .partner_care import (
     extract_partner_collect,
+    list_care_status,
     partner_from_payload,
     run_qmd,
-    status_from_partner,
 )
 from .session import GameSession
 from .farm_care import run_farm_maintain
@@ -29,6 +29,8 @@ from .mine_care import run_mine_care
 from .mine_care import SessionKicked as MineSessionKicked
 from .dbox_care import run_dbox_care
 from .dbox_care import SessionKicked as DboxSessionKicked
+from .item_spawner_care import run_item_spawner_care
+from .item_spawner_care import SessionKicked as FurnaceSessionKicked
 
 LogFn = Callable[[str], None]
 
@@ -93,13 +95,14 @@ def _login(session: GameSession, *, log: LogFn) -> float:
 
 
 def _care_status(session: GameSession, *, login_wall: float | None, log: LogFn):
+    """Multi-partner overview: ready if *any* partner's intimacy cooldown is done."""
     cl = partner_api.collect_list(session.client)
     _raise_if_kick(cl, "collect-list")
-    partner = partner_from_payload(cl)
-    if partner is None:
-        partners = extract_partner_collect(cl)
-        partner = partners[0] if partners else None
-    st = status_from_partner(partner, session, login_wall=login_wall)
+    partners = extract_partner_collect(cl)
+    if not partners:
+        one = partner_from_payload(cl)
+        partners = [one] if one else []
+    st = list_care_status(partners, session, login_wall=login_wall)
     log(f"[*] qmd status: {st.summary()}")
     return st, cl
 
@@ -124,14 +127,27 @@ def _run_afk(session: GameSession, *, log: LogFn) -> dict:
     return out
 
 
+def _raise_if_kick_blob(blob: Any, where: str) -> None:
+    if isinstance(blob, dict) and blob.get("code") == SESSION_KICK_CODE:
+        raise SessionKicked(where, body=blob)
+
+
 def _run_qmd_checked(session: GameSession, *, log: LogFn) -> dict:
+    """Claim intimacy for every ready partner (change-character + relation-exp each)."""
     care = run_qmd(session, wait_cooldown=False, log=log)
-    exp = care.get("relation_exp") or {}
-    if exp.get("code") == SESSION_KICK_CODE:
-        raise SessionKicked("relation-exp", body=exp)
+    # Flat (legacy) fields
+    _raise_if_kick_blob(care.get("relation_exp"), "relation-exp")
     for item in care.get("relation_rewards") or []:
-        if item.get("code") == SESSION_KICK_CODE:
-            raise SessionKicked("relation-reward", body=item)
+        _raise_if_kick_blob(item, "relation-reward")
+    # Per-partner multi results
+    for row in care.get("partners") or []:
+        if not isinstance(row, dict):
+            continue
+        key = row.get("key")
+        _raise_if_kick_blob(row.get("change_character"), f"change-character[{key}]")
+        _raise_if_kick_blob(row.get("relation_exp"), f"relation-exp[{key}]")
+        for item in row.get("relation_rewards") or []:
+            _raise_if_kick_blob(item, f"relation-reward[{key}]")
     return care
 
 
@@ -159,6 +175,8 @@ def _do_qmd_and_afk(
     care = _run_qmd_checked(session, log=log)
     log(
         f"[*] auto qmd ok={care.get('ok')} "
+        f"claimed={care.get('claimed')} skipped={care.get('skipped')} "
+        f"failed={care.get('failed')} "
         f"code={(care.get('relation_exp') or {}).get('code')} "
         f"err={care.get('error')}"
     )
@@ -173,14 +191,31 @@ def _do_qmd_and_afk(
 
 def _format_claim_detail(care: dict, afk: dict, st2: Any) -> str:
     after = care.get("after") or {}
+    # Per-partner compact: key:ok/skip/fail
+    per_bits = []
+    for row in care.get("partners") or []:
+        if not isinstance(row, dict):
+            continue
+        k = row.get("key")
+        if row.get("skipped"):
+            per_bits.append(f"{k}:skip")
+        elif row.get("ok"):
+            gained = row.get("exp_gained")
+            per_bits.append(f"{k}:ok+{gained if gained is not None else '?'}")
+        else:
+            code = (row.get("relation_exp") or {}).get("code")
+            per_bits.append(f"{k}:fail({code})")
     parts = [
         f"qmd_ok={bool(care.get('ok'))}",
+        f"claimed={care.get('claimed')} skipped={care.get('skipped')} failed={care.get('failed')}",
+        f"per=[{','.join(per_bits)}]" if per_bits else "per=[]",
         f"qmd_code={(care.get('relation_exp') or {}).get('code')}",
         f"exp={after.get('exp_before')}->{after.get('exp_after')}",
         f"gained={after.get('exp_gained')}",
         f"afk_list={(afk.get('reward_list') or {}).get('code')}",
         f"afk_reward={(afk.get('reward') or {}).get('code')}",
         f"afk_ad={(afk.get('ad_view') or {}).get('code')}",
+        f"ready={getattr(st2, 'ready_count', None)}/{getattr(st2, 'total_count', None)}",
         f"next={getattr(st2, 'next_str', '-')}",
         f"left={getattr(st2, 'left_sec', None)}",
     ]
@@ -198,7 +233,7 @@ def run_auto_once(
 ) -> int:
     """Single run (crontab-friendly):
 
-    login -> farm -> lab -> mine -> dbox -> qmd(if ready, else skip) -> afk -> exit
+    login -> farm -> lab -> mine -> dbox -> furnace -> qmd(if ready, else skip) -> afk -> exit
 
     No long sleep on intimacy cooldown. On -19006: wait 600s, re-login, finish once.
     """
@@ -275,7 +310,7 @@ def run_auto_once(
                 except MineSessionKicked as mk:
                     raise SessionKicked(mk.where, body=mk.body) from mk
 
-                # dbox (deploy + attack lines inside)
+                # dbox (claim + self/search deploy + attack lines inside)
                 try:
                     dbox = run_dbox_care(session, login_wall=login_wall, log=log)
                     _append_result_log(
@@ -285,11 +320,15 @@ def run_auto_once(
                             f"ok={dbox.get('ok')} "
                             f"claimed={dbox.get('claimed_keys')} "
                             f"rewards={len(dbox.get('rewards') or [])} "
-                            f"private={len(dbox.get('already_private') or [])}+"
-                            f"{len(dbox.get('connected_private') or [])} "
-                            f"public={len(dbox.get('already_public') or [])}+"
-                            f"{len(dbox.get('connected_public') or dbox.get('reconnected') or [])}/"
-                            f"{len(dbox.get('reconnect_failed') or [])} "
+                            f"self={len(dbox.get('already_self') or [])}+"
+                            f"{len(dbox.get('connected_self') or [])} "
+                            f"other={len(dbox.get('already_other') or [])}+"
+                            f"{len(dbox.get('connected_other') or [])} "
+                            f"publicLeft={len(dbox.get('already_public') or [])} "
+                            f"freeSearch={dbox.get('free_for_search')} "
+                            f"searchPool={len(dbox.get('search_pool') or [])} "
+                            f"rounds={dbox.get('search_rounds')} "
+                            f"fail={len(dbox.get('reconnect_failed') or [])} "
                             f"wins={dbox.get('wins')} fails={dbox.get('fails')} "
                             f"eligible={dbox.get('eligible')} candidates={dbox.get('candidates')} "
                             f"ovr={dbox.get('ovr_before')}->{dbox.get('ovr_after')} "
@@ -300,16 +339,48 @@ def run_auto_once(
                 except DboxSessionKicked as dk:
                     raise SessionKicked(dk.where, body=dk.body) from dk
 
-                # qmd: only claim if ready; never sleep until cooldown
+                # furnace / 装备炉: complete -> add-gold -> level-up (no open equip)
+                try:
+                    furnace = run_item_spawner_care(
+                        session, login_wall=login_wall, log=log
+                    )
+                    before = furnace.get("before") or {}
+                    after = furnace.get("after") or {}
+                    _append_result_log(
+                        result_path,
+                        result="furnace",
+                        detail=(
+                            f"ok={furnace.get('ok')} "
+                            f"lv={before.get('level')}->{after.get('level')} "
+                            f"status={after.get('status_name')} "
+                            f"deposit={after.get('count')}/{after.get('deposits_needed')} "
+                            f"added={furnace.get('deposits')} "
+                            f"completed={furnace.get('completed')} "
+                            f"leveled={furnace.get('leveled_up')} "
+                            f"bit_remain={after.get('bit_remain_for_level')} "
+                            f"skip={furnace.get('skipped_reason')}"
+                        ),
+                        log=log,
+                    )
+                except FurnaceSessionKicked as fk:
+                    raise SessionKicked(fk.where, body=fk.body) from fk
+
+                # qmd: claim every partner that is ready; never sleep until cooldown
                 st, _ = _care_status(session, login_wall=login_wall, log=log)
                 if not st.ready:
                     _append_result_log(
                         result_path,
                         result="qmd_skip",
-                        detail=f"cooling left={st.left_sec:.1f}s next={st.next_str}",
+                        detail=(
+                            f"all_cooling ready=0/{st.total_count} "
+                            f"left={st.left_sec:.1f}s next={st.next_str}"
+                        ),
                         log=log,
                     )
-                    log(f"[*] qmd skip (cooling) left={st.left_sec:.1f}s next={st.next_str}")
+                    log(
+                        f"[*] qmd skip (all cooling) ready=0/{st.total_count} "
+                        f"left={st.left_sec:.1f}s next={st.next_str}"
+                    )
                     afk = _run_afk(session, log=log)
                     _append_result_log(
                         result_path,

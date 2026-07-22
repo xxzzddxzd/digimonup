@@ -1,22 +1,6 @@
 #!/bin/zsh
-# Sync workspace autorun -> ~/cron-jobs/smbb-autorun for macOS cron.
-# Cron cannot read ~/Documents (TCC EPERM). Always run this from Terminal
-# after code changes so the next hourly job picks up the new tree.
-set -euo pipefail
-SRC="/Users/xuzhengda/Documents/workspace/smbb/autorun"
-DST="/Users/xuzhengda/cron-jobs/smbb-autorun"
-
-if [[ ! -r "$SRC/main.py" ]]; then
-  echo "ERROR: cannot read $SRC/main.py (need Terminal Full Disk Access?)" >&2
-  exit 1
-fi
-
-mkdir -p "$DST"
-/usr/bin/rsync -a --delete \
-  --exclude 'logs/' \
-  --exclude '__pycache__/' \
-  --exclude '.DS_Store' \
-  --exclude '*.pid' \
-  "$SRC/" "$DST/"
-echo "synced: $SRC -> $DST"
-echo "cron entry: 0 * * * * /Users/xuzhengda/cron-jobs/run_smbb_auto.sh"
+# Legacy no-op. Cron now runs this directory directly (like dqsg).
+# Kept so old docs/muscle memory do not break.
+echo "noop: cron uses Documents/.../smbb/autorun in place; no copy needed."
+echo "crontab:"
+echo "0 * * * * cd /Users/xuzhengda/Documents/workspace/smbb/autorun && /Users/xuzhengda/.pyenv/versions/3.12.8/bin/python3 main.py auto >> logs/auto_cron.log 2>&1"

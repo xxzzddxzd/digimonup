@@ -9,7 +9,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME := PCMacProbe
 
 PCMacProbe_FILES := PCMacProbe.mm
-PCMacProbe_CFLAGS := -fobjc-arc -fno-omit-frame-pointer -Wno-deprecated-declarations \
+PCMacProbe_CFLAGS := -fobjc-arc -fexceptions -fno-omit-frame-pointer -Wno-deprecated-declarations \
 	-Wno-unused-function -I$(CURDIR)/vendor/dobby
 PCMacProbe_CCFLAGS := -std=c++17
 PCMacProbe_FRAMEWORKS := Foundation UIKit

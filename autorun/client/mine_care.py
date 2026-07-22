@@ -1,12 +1,17 @@
 """Mine / 探查数码世界: spend stamina, pick chips (reward cells).
 
-Rules (user):
-  - Legal move: target col in {x-1,x+1} (any row in window) OR target row in
-    {y-1,y+1} (any col 0..4). Not limited to 4-neighbors.
-  - Primary goal: claim reward chips; any chip is 1-2 steps away under the rule.
+Coordinate system (live API 2026-07-21):
+  - _col: lane 0..4 only (5 vertical lanes in the TUI)
+  - _row: depth, grows as you dig: … 3616, 3617, 3618 … (infinite)
+  - Forward / deeper = +_row
+  - TUI draws _row on the horizontal axis (right = deeper) so it matches
+    in-game “x = 3000,3001,…” feel.
+
+Rules:
+  - Legal move: target col in {c±1} (any row in window) OR target row in
+    {r±1} (any col in window). Not limited to 4-neighbors.
   - Dash when >=2 of the next 3 forward cells (same col, row+1..+3) are rocks.
-  - Drill only when the chosen target is rock and blocks path; advance prefers
-    (x+4,y+1)/(x+4,y-1) then x+3 ... if no chips.
+  - Drill rocks that block the path; advance prefers +row if no chips.
   - Spend Mine_Stamina (150) down to 0; no refill.
   - Claim distance milestone reward when possible.
   - Ignore battles.
@@ -107,8 +112,7 @@ def _cells_map(mine: dict) -> dict[tuple[int, int], dict]:
 
 
 def is_legal_move(px: int, py: int, tx: int, ty: int) -> bool:
-    if tx < 0 or tx > 4:
-        return False
+    """px/py = current (_col,_row); tx/ty = target. Depth is row."""
     if tx == px and ty == py:
         return False
     return tx in (px - 1, px + 1) or ty in (py - 1, py + 1)
@@ -134,13 +138,11 @@ def _reward_cells(cells: dict[tuple[int, int], dict]) -> list[tuple[int, int, di
 def _step_targets(
     px: int, py: int, cells: dict[tuple[int, int], dict]
 ) -> list[tuple[int, int]]:
-    """All legal destinations present in the current window."""
+    """All legal destinations present in the current window (world x/y)."""
     rows = {r for (_, r) in cells}
-    cols = range(5)
+    cols = {c for (c, _) in cells}
     cands: set[tuple[int, int]] = set()
     for c in (px - 1, px + 1):
-        if c < 0 or c > 4:
-            continue
         for r in rows:
             if is_legal_move(px, py, c, r) and (c, r) in cells:
                 cands.add((c, r))
@@ -167,7 +169,7 @@ def _path_to_reward(
         if (tx, ty) in rewards:
             one.append((tx, ty))
     if one:
-        # prefer higher row (forward), then closer col
+        # prefer further +row (deeper/right on TUI), then closer col
         one.sort(key=lambda p: (-p[1], abs(p[0] - px), p[0]))
         return [one[0]]
 
@@ -175,7 +177,6 @@ def _path_to_reward(
     best: list[tuple[int, int]] | None = None
     for mx, my in _step_targets(px, py, cells):
         mid_type = _int(cells[(mx, my)].get("_type"))
-        # intermediate can be empty/reward; rock needs drill first handled outside
         for tx, ty in _step_targets(mx, my, cells):
             if (tx, ty) not in rewards:
                 continue
@@ -183,7 +184,7 @@ def _path_to_reward(
             if best is None:
                 best = path
                 continue
-            # prefer reward further forward, intermediate not rock
+            # prefer reward further +row (deeper), intermediate not rock
             score = (-ty, 0 if mid_type != CELL_ROCK else 1, abs(mx - px))
             bmx, bmy = best[0]
             btx, bty = best[1]
@@ -195,6 +196,7 @@ def _path_to_reward(
 
 
 def _forward_rock_count(px: int, py: int, cells: dict[tuple[int, int], dict]) -> int:
+    """Rocks on the next 3 cells deeper (same col, row+1..+3)."""
     n = 0
     for dr in (1, 2, 3):
         cell = cells.get((px, py + dr))
@@ -204,12 +206,12 @@ def _forward_rock_count(px: int, py: int, cells: dict[tuple[int, int], dict]) ->
 
 
 def _advance_targets(px: int, py: int, cells: dict[tuple[int, int], dict]) -> list[tuple[int, int]]:
-    """No chips: prefer (x+k, y+1)/(x+k, y-1) for k=4..1, then other legal forward-ish."""
+    """No chips: prefer +row (deeper). Same-col first, then col±1."""
     ordered: list[tuple[int, int]] = []
     seen: set[tuple[int, int]] = set()
     for k in range(4, 0, -1):
-        for dy in (1, -1):
-            tx, ty = px + k, py + dy
+        for dc in (0, 1, -1):
+            tx, ty = px + dc, py + k
             if not is_legal_move(px, py, tx, ty):
                 continue
             if (tx, ty) not in cells:
@@ -217,7 +219,6 @@ def _advance_targets(px: int, py: int, cells: dict[tuple[int, int], dict]) -> li
             if (tx, ty) not in seen:
                 ordered.append((tx, ty))
                 seen.add((tx, ty))
-    # also any legal row+1 cells left-to-right as fallback
     for tx, ty in _step_targets(px, py, cells):
         if (tx, ty) in seen:
             continue
@@ -323,10 +324,9 @@ def run_mine_care(
             log("[!] mine empty cell window")
             break
 
-        # Dash: same col forward 3, >=2 rocks
+        # Dash: same col, deeper +row by 3 when path ahead is rocky
         if dash > 0 and _forward_rock_count(px, py, cells) >= 2:
             ty = py + 3
-            # if row+3 not in window, still request; server validates
             log(f"[*] mine dash from=({px},{py}) toward row={ty} rocks>=2")
             resp = mine_api.cell_move(
                 session.client, col=px, row=ty, move_type=mine_api.MOVE_DASH

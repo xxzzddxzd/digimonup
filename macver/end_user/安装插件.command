@@ -8,6 +8,10 @@ APP_BUNDLE="${APP_BUNDLE:-$PLAYCOVER_HOME/Applications/$APP_ID.app}"
 DYLIB_SOURCE="$SCRIPT_DIR/PCMacProbe.dylib"
 INJECTOR="$SCRIPT_DIR/pc_macho_inject"
 LOAD_PATH="@executable_path/Frameworks/PCMacProbe.dylib"
+PLAYCHAIN_DIR="$PLAYCOVER_HOME/PlayChain"
+PLAYCHAIN_DB="$PLAYCHAIN_DIR/$APP_ID.db"
+PLAYCHAIN_KEYCOVER="$PLAYCHAIN_DIR/$APP_ID.keyCover"
+GAME_PREFERENCES="$HOME/Library/Containers/$APP_ID/Data/Library/Preferences/$APP_ID.plist"
 
 pause_at_exit() {
   status=$?
@@ -76,6 +80,18 @@ if pgrep -x "$EXECUTABLE_NAME" >/dev/null 2>&1; then
   fi
 fi
 
+for _ in {1..40}; do
+  if [ -f "$PLAYCHAIN_KEYCOVER" ] && [ ! -f "$PLAYCHAIN_DB" ]; then
+    break
+  fi
+  sleep 0.25
+done
+if [ -f "$PLAYCHAIN_DB" ]; then
+  echo "error: PlayChain 账号库仍未完成回写。" >&2
+  echo "请先从 PlayCover 启动一次游戏，再正常退出后重新安装插件。" >&2
+  exit 1
+fi
+
 /usr/bin/xattr -d com.apple.quarantine "$DYLIB_SOURCE" 2>/dev/null || true
 /usr/bin/xattr -d com.apple.quarantine "$INJECTOR" 2>/dev/null || true
 
@@ -91,6 +107,21 @@ done
 if [ -f "$DYLIB_TARGET" ]; then
   /bin/cp -p "$DYLIB_TARGET" "$BACKUP_DIR/"
 fi
+if [ -f "$PLAYCHAIN_KEYCOVER" ]; then
+  /bin/cp -p "$PLAYCHAIN_KEYCOVER" "$BACKUP_DIR/"
+fi
+if [ -f "$GAME_PREFERENCES" ]; then
+  /bin/cp -p "$GAME_PREFERENCES" "$BACKUP_DIR/game-preferences.plist"
+fi
+ENTITLEMENTS_BACKUP="$BACKUP_DIR/$EXECUTABLE_NAME.entitlements.plist"
+PRESERVE_ENTITLEMENTS=0
+if /usr/bin/codesign -d --entitlements :- "$EXECUTABLE" \
+    >"$ENTITLEMENTS_BACKUP" 2>/dev/null &&
+   /usr/bin/plutil -lint "$ENTITLEMENTS_BACKUP" >/dev/null 2>&1; then
+  PRESERVE_ENTITLEMENTS=1
+else
+  /bin/rm -f "$ENTITLEMENTS_BACKUP"
+fi
 echo "已创建备份：$BACKUP_DIR"
 
 /bin/mkdir -p "$APP_BUNDLE/Frameworks"
@@ -102,8 +133,25 @@ echo "正在向游戏主程序加入 dylib……"
 
 echo "正在进行本机临时签名……"
 /usr/bin/codesign --force --sign - "$DYLIB_TARGET" >/dev/null
-/usr/bin/codesign --force --sign - "$EXECUTABLE" >/dev/null
-/usr/bin/codesign --force --sign - "$APP_BUNDLE" >/dev/null
+if [ "$PRESERVE_ENTITLEMENTS" = "1" ]; then
+  /usr/bin/codesign --force --sign - \
+    --entitlements "$ENTITLEMENTS_BACKUP" "$EXECUTABLE" >/dev/null
+else
+  /usr/bin/codesign --force --sign - "$EXECUTABLE" >/dev/null
+fi
+/usr/bin/codesign --force --sign - \
+  --preserve-metadata=identifier,entitlements,requirements,flags,runtime \
+  "$APP_BUNDLE" >/dev/null
+
+if [ "$PRESERVE_ENTITLEMENTS" = "1" ]; then
+  ENTITLEMENTS_AFTER="$BACKUP_DIR/$EXECUTABLE_NAME.entitlements.after.plist"
+  /usr/bin/codesign -d --entitlements :- "$EXECUTABLE" \
+    >"$ENTITLEMENTS_AFTER" 2>/dev/null
+  if ! /usr/bin/cmp -s "$ENTITLEMENTS_BACKUP" "$ENTITLEMENTS_AFTER"; then
+    echo "error: 重新签名后 entitlement 发生变化，安装已停止。" >&2
+    exit 1
+  fi
+fi
 
 echo "正在验证……"
 "$INJECTOR" --check "$EXECUTABLE" "$LOAD_PATH"

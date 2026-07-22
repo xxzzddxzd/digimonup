@@ -8,6 +8,13 @@ Protocol:
   watering: POST /api/farm/watering {"_index","_type","_count"}
   goods:    POST /api/goods/list {}  (watering can stock)
 
+  # Recorded 2026-07-21 from capture (seed 用尽 → 看广告获取); NOT used by auto yet.
+  seed_ad:  POST /api/farm/ad-view {}
+            PS_FarmSeedADView.Request() — empty body
+            resp: {_farm: FarmLevelInfoParam(_adCount,...), _rewardAllList}
+            client API: farm_api.seed_ad_view / farm_api.ad_view
+            UI: UIFarmSeedSelect when seed stock empty
+
 E_FARM_FIELD_STATE: Seed=0 Growing=1 GrowingComplete=2 ...
 Seeds: 200/201/202
 Watering cans: Farm_WateringCan1=203 (live: -1800s each), Farm_WateringCan2=204

@@ -1,6 +1,6 @@
-"""异次元 box maintain: claim, redeploy private+public, attack.
+"""异次元 box maintain: claim, redeploy self+search, attack.
 
-Rules (user):
+Rules (user 2026-07-21):
   Deploy line and attack line are independent.
   Attack (always evaluated, even if not deployed):
   - only while A.OVR (_attackOverloadValue) < 25
@@ -8,21 +8,29 @@ Rules (user):
   - connected duration >= 30 minutes (else not attackable)
   - attack longest-connected first
 
-Collect (red-bang / 领取):
-  info._mySupporterCharacterDimBoxInfoList[*]._rewardIntervalCount > 0
-  => POST /api/dimensional-box/device-disconnect {"_keys":[...]}  (claims + unplaces)
+Collect / redeploy triggers (disconnect then ensure re-place):
+  A) rewardIntervalCount > 0
+     => device-disconnect (claim interval rewards + unplace)
+  B) private placement reaches client IsMaxRewardTime red-bang
+     (elapsed since _startTime >= DimensionalBoxMaxRewardTimeOnce,
+      or preResetCollectSeconds+elapsed >= DimensionalBoxMaxRewardTimeDaily)
+     => device-disconnect + ensure re-place even if rewardIntervalCount==0
 
-Deploy / 续上:
-  Keep BOTH placements when quota remains:
-  - 自己 box (private device-connect on my_uid)
-  - 公开 box (public-device-connect on "0".."4")
-  Never withdraw an existing placement except to claim rewards.
-  If unplaced/kicked/timeout and remainTime>0: re-place.
-  Prefer coverage: at least one private + one public when free supporters allow.
+Deploy / 续上 (no public box; N supporters):
+  - Exactly 1 supporter on 自己 box when free quota allows.
+  - All remaining free supporters (any count, not limited to 2/3):
+      search other private boxes, pick the top-N highest-加成 boxes,
+      one supporter per box (one empty equip slot each).
+  - Search rounds scale with free count (at least 5) so the pool is large enough.
+  - Never withdraw an existing placement except to claim / max-reward reset.
+  - Public box placement is abandoned for new deploys (existing left until claim).
 
 Protocol (live):
   info:        POST /api/dimensional-box/info {}
-  public-info: POST /api/dimensional-box/public-info {"_ownerUID":"0".."4"}
+  search:      POST /api/dimensional-box/search {}  -> _targetUserList
+  target-info: POST /api/dimensional-box/target-info {"_ownerUID"}
+  device-connect: POST /api/dimensional-box/device-connect
+  public-info: POST /api/dimensional-box/public-info {"_ownerUID":"0".."4"}  (attack only)
   device-info: POST /api/dimensional-box/device-info {"_targetUid","_key"}
   battle:      POST /api/dimensional-box/battle
                _attackReqUID = device._uid (required non-empty)
@@ -34,6 +42,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .apis import dbox as dbox_api
@@ -48,6 +57,17 @@ MIN_CONNECT_SEC = 30 * 60
 LEVEL_GAP = 5
 OVR_MAX = 25  # attack only while A.OVR < 25 (independent of deploy)
 BATTLE_GAP_SEC = 1.0
+SEARCH_ROUNDS = 5
+
+# GameData OtherDataOne (1.0.2): reward caps are minutes.
+# Client UIRDChecker_DimensionalBox_Info uses IsMaxRewardTime on placed supporters.
+MAX_REWARD_TIME_ONCE_MIN = 480   # DimensionalBoxMaxRewardTimeOnce
+MAX_REWARD_TIME_DAILY_MIN = 960  # DimensionalBoxMaxRewardTimeDaily
+
+# Optional local table: { "10": {"option": 1, "value": 5}, ... }
+# option: 1=DataFragment 2=Collect (E_DBOX_DECO_OPTION_TYPE). Used for 加成 ranking.
+_DECO_TABLE_PATH = Path(__file__).resolve().parent.parent / "dbox_deco_table.json"
+_DECO_TABLE_CACHE: dict[int, tuple[int, int]] | None = None
 
 
 class SessionKicked(RuntimeError):
@@ -284,19 +304,58 @@ def _reward_items_summary(body: dict) -> list[str]:
     return labels
 
 
+
+def _supporter_elapsed_sec(supporter: dict, server_ms: int) -> float:
+    start = _int(supporter.get("_startTime"), 0)
+    if start <= 0 or server_ms <= 0:
+        return 0.0
+    return max(0.0, (float(server_ms) - float(start)) / 1000.0)
+
+
+def is_max_reward_time(
+    supporter: dict,
+    *,
+    server_ms: int,
+    max_once_min: int = MAX_REWARD_TIME_ONCE_MIN,
+    max_daily_min: int = MAX_REWARD_TIME_DAILY_MIN,
+) -> bool:
+    """Client-side IsMaxRewardTime / private red-bang approximation.
+
+    Matches live UI: private placement lights red after long hang even when
+    _rewardIntervalCount == 0. Config values are minutes.
+    """
+    if not supporter or not supporter.get("_dimBoxDeviceUID"):
+        return False
+    elapsed = _supporter_elapsed_sec(supporter, server_ms)
+    if elapsed <= 0:
+        return False
+    once_sec = max(0, int(max_once_min)) * 60
+    daily_sec = max(0, int(max_daily_min)) * 60
+    pre = _int(supporter.get("_preResetCollectSeconds"), 0)
+    if once_sec and elapsed >= once_sec:
+        return True
+    if daily_sec and (pre + elapsed) >= daily_sec:
+        return True
+    return False
+
+
 def collect_dbox_rewards(
     session: GameSession,
     *,
     log: LogFn = print,
     reconnect: bool = True,
 ) -> dict:
-    """If any supporter has rewardIntervalCount>0, disconnect those keys to claim.
+    """Disconnect supporters that need claim or private max-reward reset.
 
-    This is the private-box red-bang / 领取 action observed live.
+    - rewardIntervalCount>0: claim interval rewards
+    - private placement IsMaxRewardTime: red-bang even when count==0
+      (disconnect then ensure re-place)
     """
     result: dict[str, Any] = {
         "ok": False,
         "claimable": [],
+        "max_reward_private": [],
+        "disconnect_targets": [],
         "claimed_keys": [],
         "disconnect_code": None,
         "rewards": [],
@@ -317,41 +376,80 @@ def collect_dbox_rewards(
     my_uid, my_level, nick = extract_me(info_body)
     placements = _placement_map(info_body)
     result["placements"] = {str(k): v for k, v in placements.items()}
+    server_ms = current_server_ms(session)
 
     claimable = []
+    max_reward_private = []
     for s in _my_supporters(info_body):
-        cnt = _int(s.get("_rewardIntervalCount"), 0)
         key = _int(s.get("_key"), 0)
-        if key and cnt > 0:
-            claimable.append(
-                {
-                    "key": key,
-                    "count": cnt,
-                    "remain_time": _int(s.get("_remainTime"), 0),
-                    "device_uid": s.get("_dimBoxDeviceUID"),
-                    "placement": placements.get(key),
-                }
-            )
+        if not key:
+            continue
+        cnt = _int(s.get("_rewardIntervalCount"), 0)
+        p = placements.get(key)
+        device_uid = s.get("_dimBoxDeviceUID")
+        elapsed = _supporter_elapsed_sec(s, server_ms)
+        base = {
+            "key": key,
+            "count": cnt,
+            "remain_time": _int(s.get("_remainTime"), 0),
+            "device_uid": device_uid,
+            "placement": p,
+            "elapsed_sec": round(elapsed, 1),
+            "pre_reset_collect_sec": _int(s.get("_preResetCollectSeconds"), 0),
+            "is_max_reward_time": False,
+            "reason": None,
+        }
+        if cnt > 0:
+            row = dict(base)
+            row["reason"] = "reward_interval"
+            claimable.append(row)
+            continue
+        # Private red-bang: hung to max reward time even if interval count is 0.
+        if device_uid and p and not p.get("is_public") and is_max_reward_time(s, server_ms=server_ms):
+            row = dict(base)
+            row["is_max_reward_time"] = True
+            row["reason"] = "max_reward_time_private"
+            max_reward_private.append(row)
+
     result["claimable"] = claimable
-    if not claimable:
+    result["max_reward_private"] = max_reward_private
+    # Disconnect union: interval claims + private max-reward reset.
+    by_key: dict[int, dict] = {}
+    for row in claimable + max_reward_private:
+        by_key[int(row["key"])] = row
+    targets = list(by_key.values())
+    if not targets:
         result["ok"] = True
         result["skipped_reason"] = "no_claimable"
-        log("[*] dbox collect: no rewardIntervalCount>0 (no red-bang claim)")
+        log(
+            "[*] dbox collect: no rewardIntervalCount>0 and no private max-reward "
+            "(no disconnect)"
+        )
         return result
 
-    keys = [c["key"] for c in claimable]
+    keys = [int(t["key"]) for t in targets]
     log(
-        f"[*] dbox collect claimable keys={keys} "
-        f"counts={[c['count'] for c in claimable]} me={nick or my_uid}"
+        f"[*] dbox collect disconnect keys={keys} "
+        f"interval={[c['key'] for c in claimable]} "
+        f"maxRewardPrivate={[c['key'] for c in max_reward_private]} "
+        f"me={nick or my_uid}"
     )
-    # remember placements for reconnect (claimable only)
+    # remember placements for reconnect (all disconnect targets)
     want_place = []
-    for c in claimable:
+    for c in targets:
         p = c.get("placement") or placements.get(c["key"])
         if p:
             want_place.append(p)
         else:
-            want_place.append({"key": c["key"], "owner_uid": None, "equip_index": None, "is_public": None})
+            want_place.append(
+                {
+                    "key": c["key"],
+                    "owner_uid": None,
+                    "equip_index": None,
+                    "is_public": None,
+                }
+            )
+    result["disconnect_targets"] = targets
 
     resp = dbox_api.device_disconnect(session.client, keys)
     _raise_if_kick(resp, "dimensional-box/device-disconnect")
@@ -370,204 +468,9 @@ def collect_dbox_rewards(
         + (" ..." if len(result["rewards"]) > 12 else "")
     )
 
-    # Reconnect is handled by ensure_public_box_connections (prefer public empty slots).
+    # Reconnect is handled by ensure_box_connections (self + search).
     result["ok"] = True
     return result
-
-
-def _reconnect_keys(
-    session: GameSession,
-    *,
-    keys: list[int],
-    preferred: list[dict],
-    my_uid: str | None,
-    log: LogFn,
-) -> dict:
-    pref_by_key = { _int(p.get("key"), 0): p for p in preferred if p }
-    reconnected: list[dict] = []
-    failed: list[dict] = []
-    for key in keys:
-        p = pref_by_key.get(int(key)) or {}
-        ok_entry = _place_one(
-            session,
-            key=int(key),
-            preferred=p,
-            my_uid=my_uid,
-            log=log,
-        )
-        if ok_entry.get("ok"):
-            reconnected.append(ok_entry)
-        else:
-            failed.append(ok_entry)
-    return {"reconnected": reconnected, "failed": failed}
-
-
-def _try_reconnect_free(
-    session: GameSession,
-    *,
-    info_body: dict,
-    my_uid: str | None,
-    log: LogFn,
-) -> dict:
-    free = []
-    skipped = []
-    for s in _my_supporters(info_body):
-        if s.get("_dimBoxDeviceUID"):
-            continue
-        key = _int(s.get("_key"), 0)
-        remain = _int(s.get("_remainTime"), 0)
-        if not key:
-            continue
-        # remainTime==0 => no placement quota left (live: -53011)
-        if remain <= 0:
-            skipped.append({"key": key, "reason": "remainTime=0"})
-            continue
-        free.append(key)
-    if skipped:
-        log(f"[*] dbox reconnect skip no-quota keys={skipped}")
-    if not free:
-        return {"reconnected": [], "failed": skipped}
-    log(f"[*] dbox reconnect free keys={free}")
-    return _reconnect_keys(session, keys=free, preferred=[], my_uid=my_uid, log=log)
-
-
-def _place_one(
-    session: GameSession,
-    *,
-    key: int,
-    preferred: dict,
-    my_uid: str | None,
-    log: LogFn,
-) -> dict:
-    """Try preferred slot first, then empty private, then empty public."""
-    attempts: list[dict] = []
-
-    def try_private(owner: str, equip: int) -> dict | None:
-        r = dbox_api.device_connect(
-            session.client,
-            owner_uid=owner,
-            key=key,
-            equip_index=equip,
-        )
-        _raise_if_kick(r, "dimensional-box/device-connect")
-        entry = {
-            "key": key,
-            "mode": "private",
-            "owner_uid": owner,
-            "equip_index": equip,
-            "code": _code(r),
-            "message": r.get("_message"),
-        }
-        attempts.append(entry)
-        if _code(r) in (0, None):
-            entry["ok"] = True
-            log(f"[+] dbox reconnect private key={key} equip={equip}")
-            return entry
-        return None
-
-    def try_public(owner: str, equip: int) -> dict | None:
-        r = dbox_api.public_device_connect(
-            session.client,
-            owner_uid=str(owner),
-            key=key,
-            equip_index=equip,
-        )
-        _raise_if_kick(r, "dimensional-box/public-device-connect")
-        entry = {
-            "key": key,
-            "mode": "public",
-            "owner_uid": str(owner),
-            "equip_index": equip,
-            "code": _code(r),
-            "message": r.get("_message"),
-        }
-        attempts.append(entry)
-        if _code(r) in (0, None):
-            entry["ok"] = True
-            log(f"[+] dbox reconnect public key={key} box={owner} equip={equip}")
-            return entry
-        return None
-
-    # 1) preferred
-    if preferred.get("owner_uid") is not None and preferred.get("equip_index") is not None:
-        owner = str(preferred.get("owner_uid"))
-        equip = _int(preferred.get("equip_index"), 0)
-        if preferred.get("is_public") or owner in PUBLIC_BOX_IDS:
-            hit = try_public(owner, equip)
-        else:
-            hit = try_private(owner, equip)
-        if hit:
-            return hit
-
-    # Hard fail codes that are not slot-specific (don't scan every slot)
-    # -53011: no placement time left for this supporter
-    # -53018: redeploy cooltime for this box/target
-    STOP_CODES = {-53011}
-
-    # 2) empty private slots (need fresh info)
-    info_body = dbox_api.info(session.client)
-    _raise_if_kick(info_body, "dimensional-box/info(place)")
-    if not my_uid:
-        my_uid, _, _ = extract_me(info_body)
-    empties = [
-        _int(d.get("_equipIndex"), 0)
-        for d in _list_of(info_body.get("_deviceList"))
-        if not d.get("_key") and not d.get("_targetUserId")
-    ]
-    if my_uid:
-        for equip in empties:
-            hit = try_private(str(my_uid), equip)
-            if hit:
-                return hit
-            if attempts and attempts[-1].get("code") in STOP_CODES:
-                log(
-                    f"[*] dbox reconnect stop key={key} code={attempts[-1].get('code')} "
-                    f"msg={attempts[-1].get('message')}"
-                )
-                return {
-                    "ok": False,
-                    "key": key,
-                    "attempts": attempts[-3:],
-                    "message": attempts[-1].get("message"),
-                    "code": attempts[-1].get("code"),
-                }
-
-    # 3) empty public slots
-    for box in PUBLIC_BOX_IDS:
-        pub = dbox_api.public_info(session.client, box)
-        _raise_if_kick(pub, f"dimensional-box/public-info[{box}]")
-        if _code(pub) not in (0, None):
-            continue
-        for d in _list_of(pub.get("_deviceList")):
-            if d.get("_targetUserId"):
-                continue
-            hit = try_public(box, _int(d.get("_equipIndex"), 0))
-            if hit:
-                return hit
-            if attempts and attempts[-1].get("code") in STOP_CODES:
-                log(
-                    f"[*] dbox reconnect stop key={key} code={attempts[-1].get('code')} "
-                    f"msg={attempts[-1].get('message')}"
-                )
-                return {
-                    "ok": False,
-                    "key": key,
-                    "attempts": attempts[-3:],
-                    "message": attempts[-1].get("message"),
-                    "code": attempts[-1].get("code"),
-                }
-            # cooltime on one public box: try next box, not every equip
-            if attempts and attempts[-1].get("code") == -53018:
-                break
-
-    log(f"[*] dbox reconnect failed key={key} attempts={len(attempts)} last={attempts[-1] if attempts else None}")
-    return {
-        "ok": False,
-        "key": key,
-        "attempts": attempts[-3:],
-        "message": (attempts[-1] or {}).get("message") if attempts else "no_slot",
-        "code": (attempts[-1] or {}).get("code") if attempts else None,
-    }
 
 
 
@@ -577,28 +480,358 @@ def _is_public_owner(owner_uid: str | None, is_public: bool | None = None) -> bo
     return str(owner_uid or "") in PUBLIC_BOX_IDS
 
 
+def _load_deco_table() -> dict[int, tuple[int, int]]:
+    """key -> (optionType, value). option 1=DataFragment 2=Collect."""
+    global _DECO_TABLE_CACHE
+    if _DECO_TABLE_CACHE is not None:
+        return _DECO_TABLE_CACHE
+    table: dict[int, tuple[int, int]] = {}
+    try:
+        if _DECO_TABLE_PATH.is_file():
+            raw = json.loads(_DECO_TABLE_PATH.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                for k, v in raw.items():
+                    if isinstance(v, dict):
+                        table[_int(k)] = (_int(v.get("option"), 0), _int(v.get("value"), 0))
+                    elif isinstance(v, (list, tuple)) and len(v) >= 2:
+                        table[_int(k)] = (_int(v[0]), _int(v[1]))
+    except Exception:
+        table = {}
+    _DECO_TABLE_CACHE = table
+    return table
+
+
+def _deco_keys_from_equip(deco_list: Any) -> list[int]:
+    keys: list[int] = []
+    for d in _list_of(deco_list):
+        k = _int(d.get("_key"), 0)
+        if k > 0:
+            keys.append(k)
+    return keys
+
+
+def score_box_bonus(deco_list: Any) -> tuple[int, int, int, int, int]:
+    """Return sort key for 加成 (higher better).
+
+    Client UI shows DataFragment + Collect via GetTotalDecoOptionRatio.
+    When dbox_deco_table.json is present, use real option sums.
+    Fallback: more equipped decos first, then higher key sum (later/better items).
+    """
+    keys = _deco_keys_from_equip(deco_list)
+    table = _load_deco_table()
+    data_fragment = 0
+    collect = 0
+    if table:
+        for k in keys:
+            opt, val = table.get(k, (0, 0))
+            if opt == 1:
+                data_fragment += val
+            elif opt == 2:
+                collect += val
+        total = data_fragment + collect
+        return (total, data_fragment, collect, len(keys), sum(keys))
+    # no table: approximate 加成 by equip density
+    return (len(keys), sum(keys), 0, len(keys), sum(keys))
+
+
+def _user_uid(user_obj: Any) -> str | None:
+    if not isinstance(user_obj, dict):
+        return None
+    uid = user_obj.get("_uid")
+    if uid:
+        return str(uid)
+    nested = user_obj.get("_user")
+    if isinstance(nested, dict) and nested.get("_uid"):
+        return str(nested.get("_uid"))
+    return None
+
+
+def _parse_search_targets(body: dict) -> list[dict]:
+    """Normalize search _targetUserList into candidate dicts."""
+    out: list[dict] = []
+    for t in _list_of(body.get("_targetUserList")):
+        user = t.get("_user") if isinstance(t.get("_user"), dict) else {}
+        uid = _user_uid(user)
+        if not uid:
+            continue
+        deco = t.get("_dimensionalBoxDecoEquipList")
+        score = score_box_bonus(deco)
+        out.append(
+            {
+                "uid": uid,
+                "nick": user.get("_nickName"),
+                "level": _int(user.get("_level"), 0),
+                "deco_keys": _deco_keys_from_equip(deco),
+                "score": score,
+                "bonus_total": score[0],
+                "raw": t,
+            }
+        )
+    return out
+
+
+def search_box_candidates(
+    session: GameSession,
+    *,
+    rounds: int = SEARCH_ROUNDS,
+    exclude_uids: set[str] | None = None,
+    log: LogFn = print,
+) -> list[dict]:
+    """Run search N times, merge unique owners, sort by 加成 desc."""
+    exclude = set(exclude_uids or ())
+    by_uid: dict[str, dict] = {}
+    for i in range(max(1, int(rounds))):
+        body = dbox_api.search(session.client)
+        _raise_if_kick(body, f"dimensional-box/search[{i}]")
+        if _code(body) not in (0, None):
+            log(
+                f"[*] dbox search#{i+1} code={_code(body)} msg={body.get('_message')}"
+            )
+            continue
+        batch = _parse_search_targets(body)
+        top = sorted(batch, key=lambda x: x["score"], reverse=True)[:3]
+        log(
+            f"[*] dbox search#{i+1} hits={len(batch)} "
+            f"top={[(b.get('nick'), b.get('bonus_total'), b.get('deco_keys')) for b in top]}"
+        )
+        for b in batch:
+            if b["uid"] in exclude:
+                continue
+            prev = by_uid.get(b["uid"])
+            if prev is None or b["score"] > prev["score"]:
+                by_uid[b["uid"]] = b
+    ranked = sorted(by_uid.values(), key=lambda x: x["score"], reverse=True)
+    log(
+        f"[*] dbox search pool unique={len(ranked)} "
+        f"best={[(r.get('nick'), r.get('bonus_total'), r.get('deco_keys')) for r in ranked[:5]]}"
+    )
+    return ranked
+
+
+def _empty_equips_from_devices(devices: list[dict]) -> list[int]:
+    empties: list[int] = []
+    for d in devices:
+        if d.get("_targetUserId") or _int(d.get("_key"), 0):
+            continue
+        empties.append(_int(d.get("_equipIndex"), 0))
+    return empties
+
+
+def _self_empty_equips(info_body: dict, my_uid: str | None) -> list[int]:
+    empties: list[int] = []
+    for d in _list_of(info_body.get("_deviceList")):
+        owner = str(d.get("_ownerId") or "")
+        if _is_public_owner(owner, bool(d.get("_isPublic"))):
+            continue
+        if my_uid and owner and owner != str(my_uid):
+            continue
+        if d.get("_targetUserId") or _int(d.get("_key"), 0):
+            continue
+        empties.append(_int(d.get("_equipIndex"), 0))
+    return empties
+
+
+def _connect_device(
+    session: GameSession,
+    *,
+    owner_uid: str,
+    key: int,
+    equip_index: int,
+    log: LogFn,
+    label: str,
+) -> dict:
+    r = dbox_api.device_connect(
+        session.client,
+        owner_uid=str(owner_uid),
+        key=int(key),
+        equip_index=int(equip_index),
+    )
+    _raise_if_kick(r, f"dimensional-box/device-connect[{label}]")
+    return {
+        "ok": _code(r) in (0, None),
+        "key": int(key),
+        "owner_uid": str(owner_uid),
+        "equip_index": int(equip_index),
+        "code": _code(r),
+        "message": r.get("_message"),
+        "mode": label,
+    }
+
+
+def _place_on_self(
+    session: GameSession,
+    *,
+    key: int,
+    my_uid: str,
+    info_body: dict,
+    log: LogFn,
+) -> dict:
+    empties = _self_empty_equips(info_body, my_uid)
+    if not empties:
+        return {
+            "ok": False,
+            "key": key,
+            "mode": "self",
+            "message": "no_empty_self_slot",
+            "code": None,
+        }
+    last: dict | None = None
+    for equip in empties:
+        entry = _connect_device(
+            session,
+            owner_uid=my_uid,
+            key=key,
+            equip_index=equip,
+            log=log,
+            label="self",
+        )
+        last = entry
+        if entry.get("ok"):
+            log(f"[+] dbox self connect key={key} equip={equip}")
+            return entry
+        if entry.get("code") == -53011:
+            break
+    return last or {
+        "ok": False,
+        "key": key,
+        "mode": "self",
+        "message": "self_connect_failed",
+        "code": None,
+    }
+
+
+def _place_on_searched(
+    session: GameSession,
+    *,
+    key: int,
+    candidates: list[dict],
+    occupied_owners: set[str],
+    log: LogFn,
+) -> dict:
+    """Try highest-bonus candidates that still have empty slots."""
+    last: dict | None = None
+    tried_uids: list[str] = []
+    for cand in candidates:
+        uid = str(cand["uid"])
+        if uid in occupied_owners:
+            continue
+        tried_uids.append(uid)
+        ti = dbox_api.target_info(session.client, uid)
+        _raise_if_kick(ti, f"dimensional-box/target-info[{uid[:8]}]")
+        if _code(ti) not in (0, None):
+            last = {
+                "ok": False,
+                "key": key,
+                "mode": "search",
+                "owner_uid": uid,
+                "code": _code(ti),
+                "message": ti.get("_message"),
+                "bonus_total": cand.get("bonus_total"),
+                "nick": cand.get("nick"),
+            }
+            continue
+        empties = _empty_equips_from_devices(_list_of(ti.get("_deviceList")))
+        if not empties:
+            log(
+                f"[*] dbox search target full nick={cand.get('nick')} "
+                f"bonus={cand.get('bonus_total')} decos={cand.get('deco_keys')}"
+            )
+            last = {
+                "ok": False,
+                "key": key,
+                "mode": "search",
+                "owner_uid": uid,
+                "message": "no_empty_slot",
+                "bonus_total": cand.get("bonus_total"),
+                "nick": cand.get("nick"),
+            }
+            continue
+        for equip in empties:
+            entry = _connect_device(
+                session,
+                owner_uid=uid,
+                key=key,
+                equip_index=equip,
+                log=log,
+                label="search",
+            )
+            entry["bonus_total"] = cand.get("bonus_total")
+            entry["nick"] = cand.get("nick")
+            entry["deco_keys"] = cand.get("deco_keys")
+            entry["mode"] = "search"
+            last = entry
+            if entry.get("ok"):
+                log(
+                    f"[+] dbox search connect key={key} nick={cand.get('nick')} "
+                    f"bonus={cand.get('bonus_total')} deco={cand.get('deco_keys')} "
+                    f"equip={equip}"
+                )
+                return entry
+            code = entry.get("code")
+            if code == -53011:
+                return entry
+            if code in (-53018, -53003, -53004, -53005):
+                log(
+                    f"[*] dbox search skip nick={cand.get('nick')} code={code} "
+                    f"msg={entry.get('message')}"
+                )
+                break
+    return last or {
+        "ok": False,
+        "key": key,
+        "mode": "search",
+        "message": "no_candidate",
+        "tried": tried_uids[:8],
+        "code": None,
+    }
+
+
+def _search_rounds_for_free(free_count: int, *, base: int = SEARCH_ROUNDS) -> int:
+    """Scale search rounds with free supporters so top-N boxes are covered.
+
+    Each search returns ~5 owners. Default at least `base` (5). When many free
+    slots need distinct boxes, grow rounds (cap 20) for spare full/cooltime skips.
+    """
+    n = max(0, int(free_count))
+    if n <= 0:
+        return int(base)
+    # ~5 unique-ish per round; want ~2x free_count headroom in pool
+    by_need = (n * 2 + 4) // 5  # ceil(2n/5)
+    return min(20, max(int(base), by_need, n))
+
+
 def ensure_box_connections(
     session: GameSession,
     *,
     log: LogFn = print,
+    search_rounds: int | None = None,
 ) -> dict:
-    """Keep private (self) and public box placements up after timeout/kick/claim.
+    """Keep 1 on self; place any number of free supporters on distinct search boxes.
 
-    - Already placed (private or public): leave alone.
-    - Free supporters with remainTime>0: re-place.
-    - Coverage goal: at least one on self box + one on a public box.
-    - Never disconnect just to move private->public (claim path only).
+    - Already placed (self / other private / leftover public): leave alone.
+    - Free supporters with remainTime>0 (count unlimited):
+        1) if no self placement yet → one device-connect on own empty slot
+        2) remaining free (n) → search, rank by 加成, connect to top-n *different*
+           private boxes (one empty equip each; skip owners we already occupy)
+    - Public box is not used for new placements.
     """
     result: dict[str, Any] = {
         "ok": False,
+        "already_self": [],
+        "already_other": [],
         "already_public": [],
-        "already_private": [],
-        "connected_public": [],
-        "connected_private": [],
-        "connected": [],  # compat: all new connections
-        "moved": [],  # compat (no forced moves)
+        "already_private": [],  # compat: self+other
+        "connected_self": [],
+        "connected_other": [],
+        "connected_private": [],  # compat
+        "connected_public": [],  # always empty under new policy
+        "connected": [],
+        "moved": [],
         "failed": [],
         "skipped": [],
+        "search_pool": [],
+        "search_rounds": 0,
+        "free_for_search": 0,
     }
 
     info_body = dbox_api.info(session.client)
@@ -615,12 +848,13 @@ def ensure_box_connections(
     supporters = _my_supporters(info_body)
     log(
         f"[*] dbox ensure me={nick or my_uid} supporters={len(supporters)} "
-        f"placements={len(placements)}"
+        f"placements={len(placements)} policy=self+1 / search+rest(N)"
     )
 
-    already_public: list[dict] = []
-    already_private: list[dict] = []
     free: list[tuple[int, int]] = []  # (key, remain)
+    occupied_owners: set[str] = set()
+    if my_uid:
+        occupied_owners.add(str(my_uid))
 
     for s in supporters:
         key = _int(s.get("_key"), 0)
@@ -628,252 +862,141 @@ def ensure_box_connections(
             continue
         remain = _int(s.get("_remainTime"), 0)
         p = placements.get(key)
-        if p and _is_public_owner(p.get("owner_uid"), p.get("is_public")):
+        if not p:
+            if remain <= 0:
+                result["skipped"].append({"key": key, "reason": "remainTime=0"})
+                log(f"[*] dbox skip key={key} remainTime=0 (no quota)")
+            else:
+                free.append((key, remain))
+            continue
+
+        owner = str(p.get("owner_uid") or "")
+        if owner:
+            occupied_owners.add(owner)
+        equip = p.get("equip_index")
+        if _is_public_owner(owner, p.get("is_public")):
             entry = {
                 "key": key,
-                "box": p.get("owner_uid"),
-                "equip_index": p.get("equip_index"),
+                "box": owner,
+                "equip_index": equip,
                 "remain": remain,
                 "mode": "public",
             }
-            already_public.append(entry)
             result["already_public"].append(entry)
             log(
-                f"[*] dbox public ok key={key} box={p.get('owner_uid')} "
-                f"equip={p.get('equip_index')} remain={remain}"
+                f"[*] dbox public leftover key={key} box={owner} equip={equip} "
+                f"remain={remain} (no new public deploys)"
             )
             continue
-        if p:
-            entry = {
-                "key": key,
-                "owner_uid": p.get("owner_uid"),
-                "equip_index": p.get("equip_index"),
-                "remain": remain,
-                "mode": "private",
-            }
-            already_private.append(entry)
-            result["already_private"].append(entry)
+
+        is_self = bool(my_uid and owner == str(my_uid))
+        entry = {
+            "key": key,
+            "owner_uid": owner,
+            "equip_index": equip,
+            "remain": remain,
+            "mode": "self" if is_self else "other",
+        }
+        if is_self:
+            result["already_self"].append(entry)
+            log(f"[*] dbox self ok key={key} equip={equip} remain={remain}")
+        else:
+            result["already_other"].append(entry)
             log(
-                f"[*] dbox private ok key={key} equip={p.get('equip_index')} "
+                f"[*] dbox other ok key={key} owner={owner[:8]}… equip={equip} "
                 f"remain={remain}"
             )
-            continue
-        if remain <= 0:
-            result["skipped"].append({"key": key, "reason": "remainTime=0"})
-            log(f"[*] dbox skip key={key} remainTime=0 (no quota)")
-            continue
-        free.append((key, remain))
+        result["already_private"].append(entry)
 
     free.sort(key=lambda x: x[1], reverse=True)
-    has_private = bool(already_private)
-    has_public = bool(already_public)
+    has_self = bool(result["already_self"])
 
-    empty_public: list[tuple[str, int]] | None = None
-    empty_private: list[int] | None = None
-
-    def load_empty_public() -> list[tuple[str, int]]:
-        slots: list[tuple[str, int]] = []
-        for box in PUBLIC_BOX_IDS:
-            pub = dbox_api.public_info(session.client, box)
-            _raise_if_kick(pub, f"dimensional-box/public-info[{box}]")
-            if _code(pub) not in (0, None):
-                continue
-            for d in _list_of(pub.get("_deviceList")):
-                if d.get("_targetUserId"):
-                    continue
-                slots.append((str(box), _int(d.get("_equipIndex"), 0)))
-        return slots
-
-    def load_empty_private() -> list[int]:
-        body = dbox_api.info(session.client)
-        _raise_if_kick(body, "dimensional-box/info(private-slots)")
-        slots: list[int] = []
-        for d in _list_of(body.get("_deviceList")):
-            if d.get("_targetUserId") or d.get("_key"):
-                continue
-            # private self-box devices only
-            owner = str(d.get("_ownerId") or "")
-            if owner and my_uid and owner != str(my_uid) and owner in PUBLIC_BOX_IDS:
-                continue
-            if bool(d.get("_isPublic")) or owner in PUBLIC_BOX_IDS:
-                continue
-            slots.append(_int(d.get("_equipIndex"), 0))
-        # fallback: any empty non-public-looking slot
-        if not slots:
-            for d in _list_of(body.get("_deviceList")):
-                if d.get("_targetUserId") or d.get("_key"):
-                    continue
-                owner = str(d.get("_ownerId") or "")
-                if owner in PUBLIC_BOX_IDS or bool(d.get("_isPublic")):
-                    continue
-                slots.append(_int(d.get("_equipIndex"), 0))
-        return slots
-
-    def take_public_slot() -> tuple[str, int] | None:
-        nonlocal empty_public
-        if empty_public is None:
-            empty_public = load_empty_public()
-        if not empty_public:
-            return None
-        return empty_public.pop(0)
-
-    def take_private_slot() -> int | None:
-        nonlocal empty_private
-        if empty_private is None:
-            empty_private = load_empty_private()
-        if not empty_private:
-            return None
-        return empty_private.pop(0)
-
-    def connect_public(key: int, box: str, equip: int) -> dict:
-        r = dbox_api.public_device_connect(
-            session.client, owner_uid=str(box), key=int(key), equip_index=int(equip)
+    # 1) fill self first if missing (only one self slot among free keys)
+    if free and not has_self and my_uid:
+        key, remain = free.pop(0)
+        entry = _place_on_self(
+            session, key=key, my_uid=str(my_uid), info_body=info_body, log=log
         )
-        _raise_if_kick(r, "dimensional-box/public-device-connect")
-        return {
-            "key": key,
-            "mode": "public",
-            "box": str(box),
-            "owner_uid": str(box),
-            "equip_index": int(equip),
-            "code": _code(r),
-            "message": r.get("_message"),
-            "ok": _code(r) in (0, None),
-        }
+        if entry.get("ok"):
+            has_self = True
+            result["connected_self"].append(entry)
+            result["connected_private"].append(entry)
+            result["connected"].append(entry)
+            occupied_owners.add(str(my_uid))
+            info_body = dbox_api.info(session.client)
+            _raise_if_kick(info_body, "dimensional-box/info(after-self)")
+        else:
+            result["failed"].append(entry)
+            log(f"[-] dbox self connect fail key={key} last={entry}")
 
-    def connect_private(key: int, equip: int) -> dict:
-        if not my_uid:
-            return {
-                "key": key,
-                "mode": "private",
-                "equip_index": int(equip),
-                "code": None,
-                "message": "no_my_uid",
-                "ok": False,
-            }
-        r = dbox_api.device_connect(
-            session.client,
-            owner_uid=str(my_uid),
-            key=int(key),
-            equip_index=int(equip),
+    # 2) remaining free (any n) → search + top-n distinct highest-加成 boxes
+    result["free_for_search"] = len(free)
+    if free:
+        rounds = (
+            int(search_rounds)
+            if search_rounds is not None
+            else _search_rounds_for_free(len(free))
         )
-        _raise_if_kick(r, "dimensional-box/device-connect")
-        return {
-            "key": key,
-            "mode": "private",
-            "owner_uid": str(my_uid),
-            "equip_index": int(equip),
-            "code": _code(r),
-            "message": r.get("_message"),
-            "ok": _code(r) in (0, None),
-        }
-
-    def try_place_public(key: int) -> dict | None:
-        nonlocal empty_public
-        last = None
-        for _try in range(12):
-            slot = take_public_slot()
-            if not slot:
-                return last or {
-                    "ok": False,
-                    "key": key,
-                    "mode": "public",
-                    "code": None,
-                    "message": "no_empty_public_slot",
-                }
-            box, equip = slot
-            entry = connect_public(key, box, equip)
-            if entry.get("ok"):
-                return entry
-            last = entry
-            code = entry.get("code")
-            if code == -53011:
-                return entry
-            if code == -53018 and empty_public is not None:
-                empty_public = [(b, e) for (b, e) in empty_public if b != str(box)]
-                continue
-            # -53003 same-box duplicate etc: try next slot/box
-        return last
-
-    def try_place_private(key: int) -> dict | None:
-        nonlocal empty_private
-        last = None
-        for _try in range(8):
-            equip = take_private_slot()
-            if equip is None:
-                return last or {
-                    "ok": False,
-                    "key": key,
-                    "mode": "private",
-                    "code": None,
-                    "message": "no_empty_private_slot",
-                }
-            entry = connect_private(key, equip)
-            if entry.get("ok"):
-                return entry
-            last = entry
-            code = entry.get("code")
-            if code == -53011:
-                return entry
-            # slot invalid: try next empty
-        return last
-
-    for key, remain in free:
-        # coverage: private first if missing, then public if missing, else prefer public
-        order: list[str]
-        if not has_private and not has_public:
-            order = ["private", "public"]
-        elif not has_private:
-            order = ["private", "public"]
-        elif not has_public:
-            order = ["public", "private"]
-        else:
-            order = ["public", "private"]
-
-        placed_entry = None
-        for mode in order:
-            if mode == "private":
-                entry = try_place_private(key)
-            else:
-                entry = try_place_public(key)
-            if entry and entry.get("ok"):
-                placed_entry = entry
-                break
-            if entry and entry.get("code") == -53011:
-                placed_entry = entry
-                break
-
-        if placed_entry and placed_entry.get("ok"):
-            if placed_entry.get("mode") == "private":
-                has_private = True
-                result["connected_private"].append(placed_entry)
-                log(
-                    f"[+] dbox private connect key={key} equip={placed_entry.get('equip_index')} "
-                    f"remain_was={remain}"
-                )
-            else:
-                has_public = True
-                result["connected_public"].append(placed_entry)
-                log(
-                    f"[+] dbox public connect key={key} box={placed_entry.get('box')} "
-                    f"equip={placed_entry.get('equip_index')} remain_was={remain}"
-                )
-            result["connected"].append(placed_entry)
-        else:
-            fail = placed_entry or {
-                "key": key,
-                "ok": False,
-                "message": "place_failed",
+        result["search_rounds"] = rounds
+        log(
+            f"[*] dbox search place free={len(free)} keys={[k for k,_ in free]} "
+            f"rounds={rounds} (1 box each, highest bonus first)"
+        )
+        candidates = search_box_candidates(
+            session,
+            rounds=rounds,
+            exclude_uids=occupied_owners,
+            log=log,
+        )
+        # keep a bit more than free count for logging / retry headroom
+        pool_n = max(20, len(free) * 3)
+        result["search_pool"] = [
+            {
+                "uid": c["uid"],
+                "nick": c.get("nick"),
+                "level": c.get("level"),
+                "bonus_total": c.get("bonus_total"),
+                "deco_keys": c.get("deco_keys"),
             }
-            result["failed"].append(fail)
-            log(f"[-] dbox connect fail key={key} last={fail}")
+            for c in candidates[:pool_n]
+        ]
+        for idx, (key, remain) in enumerate(free, start=1):
+            log(
+                f"[*] dbox search assign {idx}/{len(free)} key={key} "
+                f"remain={remain} occupied_boxes={len(occupied_owners)}"
+            )
+            entry = _place_on_searched(
+                session,
+                key=key,
+                candidates=candidates,
+                occupied_owners=occupied_owners,
+                log=log,
+            )
+            if entry.get("ok"):
+                owner = str(entry.get("owner_uid") or "")
+                if owner:
+                    occupied_owners.add(owner)
+                result["connected_other"].append(entry)
+                result["connected_private"].append(entry)
+                result["connected"].append(entry)
+            else:
+                result["failed"].append(entry)
+                log(
+                    f"[-] dbox search connect fail key={key} remain={remain} last={entry}"
+                )
+    else:
+        result["search_rounds"] = 0
+        log("[*] dbox no free supporters for search place")
 
     result["ok"] = True
     log(
         f"[*] dbox ensure done "
-        f"private={len(result['already_private'])}+{len(result['connected_private'])} "
-        f"public={len(result['already_public'])}+{len(result['connected_public'])} "
-        f"failed={len(result['failed'])} skipped={len(result['skipped'])}"
+        f"self={len(result['already_self'])}+{len(result['connected_self'])} "
+        f"other={len(result['already_other'])}+{len(result['connected_other'])} "
+        f"public_left={len(result['already_public'])} "
+        f"free_search={result['free_for_search']} "
+        f"failed={len(result['failed'])} skipped={len(result['skipped'])} "
+        f"search_pool={len(result['search_pool'])} rounds={result['search_rounds']}"
     )
     return result
 
@@ -887,7 +1010,6 @@ def ensure_public_box_connections(
     return ensure_box_connections(session, log=log)
 
 
-
 def run_dbox_care(
     session: GameSession,
     *,
@@ -895,27 +1017,26 @@ def run_dbox_care(
     log: LogFn = print,
     max_attacks: int | None = None,
 ) -> dict:
-    """Maintain dbox: claim if needed, keep private+public connections, then attacks.
+    """Maintain dbox: claim if needed, keep self+search placements, then attacks.
 
-    Placement policy:
-      - do not withdraw unless claiming rewards
-      - after timeout/kick/claim, re-place free quota on self box and public box
-      - target: at least one private + one public when supporters allow
+    Placement policy (N supporters):
+      - withdraw only for rewardIntervalCount claim or private IsMaxRewardTime reset
+      - after free/kick/claim: keep 1 on self; place remaining free on top-N
+        distinct search boxes (highest 加成 each, one empty slot per box)
+      - public box is not used for new deploys
     """
-    # Line A: deploy/claim (does not gate attacks)
     collect = collect_dbox_rewards(session, log=log, reconnect=False)
-    public = ensure_box_connections(session, log=log)
+    ensure = ensure_box_connections(session, log=log)
 
-    # Line B: attacks — independent of whether we have public placements
     attacks = run_dbox_attacks(
         session, login_wall=login_wall, log=log, max_attacks=max_attacks
     )
     return {
         "ok": bool(attacks.get("ok")),
         "collect": collect,
-        "public": public,
+        "public": ensure,  # compat key name
+        "ensure": ensure,
         "attacks": attacks,
-        # flatten common fields for qmdauto log line
         "wins": attacks.get("wins"),
         "fails": attacks.get("fails"),
         "eligible": attacks.get("eligible"),
@@ -925,14 +1046,23 @@ def run_dbox_care(
         "skipped_reason": attacks.get("skipped_reason"),
         "claimed_keys": collect.get("claimed_keys") or [],
         "claimable": collect.get("claimable") or [],
+        "max_reward_private": collect.get("max_reward_private") or [],
         "rewards": collect.get("rewards") or [],
-        "reconnected": (public.get("connected") or []) + (public.get("moved") or []),
-        "reconnect_failed": public.get("failed") or [],
-        "already_public": public.get("already_public") or [],
-        "already_private": public.get("already_private") or [],
-        "connected_public": public.get("connected_public") or [],
-        "connected_private": public.get("connected_private") or [],
+        "reconnected": (ensure.get("connected") or []) + (ensure.get("moved") or []),
+        "reconnect_failed": ensure.get("failed") or [],
+        "already_public": ensure.get("already_public") or [],
+        "already_private": ensure.get("already_private") or [],
+        "already_self": ensure.get("already_self") or [],
+        "already_other": ensure.get("already_other") or [],
+        "connected_public": ensure.get("connected_public") or [],
+        "connected_private": ensure.get("connected_private") or [],
+        "connected_self": ensure.get("connected_self") or [],
+        "connected_other": ensure.get("connected_other") or [],
+        "search_pool": ensure.get("search_pool") or [],
+        "search_rounds": ensure.get("search_rounds") or 0,
+        "free_for_search": ensure.get("free_for_search") or 0,
     }
+
 
 
 def run_dbox_attacks(

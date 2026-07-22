@@ -8,6 +8,31 @@ from dataclasses import dataclass, field
 from typing import Any, Deque, Optional
 
 
+# Client BattleInfoParam.sectorCount — 游戏内显示的「第 N 关」累计号:
+#   N = maxStage * maxSector * repeat + maxSector * (stage - 1) + sector
+# 主线表: 60 stages × 10 sectors per stage (= 600 关/周目)
+# 例: stage=31, sector=4, repeat=1 → 60*10*1 + 10*30 + 4 = 904
+DEFAULT_MAX_STAGE = 60
+DEFAULT_MAX_SECTOR = 10
+
+
+def ui_stage_no(
+    stage: int,
+    sector: int,
+    repeat: int = 0,
+    *,
+    max_stage: int = DEFAULT_MAX_STAGE,
+    max_sector: int = DEFAULT_MAX_SECTOR,
+) -> int:
+    """游戏内关卡号（UI「904关」），与 BattleInfoParam.sectorCount 一致。"""
+    stage = int(stage or 0)
+    sector = int(sector or 0)
+    repeat = int(repeat or 0)
+    if stage <= 0 or sector <= 0:
+        return 0
+    return max_stage * max_sector * repeat + max_sector * (stage - 1) + sector
+
+
 @dataclass
 class HttpEvent:
     ts: float
@@ -68,6 +93,7 @@ class RuntimeState:
                 "stage": self.stage,
                 "sector": self.sector,
                 "repeat": self.repeat,
+                "ui_stage": ui_stage_no(self.stage, self.sector, self.repeat),
                 "loop_i": self.loop_i,
                 "loop_total": self.loop_total,
                 "wins": self.wins,

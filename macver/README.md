@@ -13,10 +13,28 @@ The vendored Dobby attribution and hashes are recorded in
 
 ## In-game controls
 
-The floating **加速** button opens the plugin panel. The only user-facing
+The floating **加速** button (remembers last edge/Y; auto-collapses after ~2.5s idle) opens the plugin panel. The only user-facing
 setting is an integer game-speed slider from 1x through 10x; the selected value
 is persisted across launches. All other plugin behavior remains enabled by
 default and has no panel switch.
+
+Completed main-scene guide quests are claimed automatically. This uses the
+same `UIGuideQuestInfo.SetData` / `PS_QuestComplete.Request` path as the iOS
+plugin, is enabled by default, and suppresses duplicate requests for 10 seconds.
+
+Notice, login-bonus, AFK, and time-deal startup popups are skipped after login;
+their normal manual entry points remain available. The macOS plugin does not
+force Guest login, so PlayCover users retain control of account selection.
+
+Reward popups close two seconds after their completion animation. Better
+hologram equipment produced by the item-spawner flow is equipped automatically,
+without affecting ordinary item-selection screens. Partner-care events are
+triggered automatically after their normal cooldown and visibility checks.
+
+Firewall dungeons bypass ranking preloads after the normal ticket/content
+checks and transition directly into battle. Every rendered mine cell is
+selectable; farther moves reload the authoritative server-side mine view.
+Growth guides opened by an ordinary battle defeat close after one second.
 
 For game version 1.0.2, speed control hooks the confirmed IL2CPP wrapper for
 `UnityEngine.Time.set_timeScale(float)` at UnityFramework offset `0x06A4C1E0`.
@@ -42,9 +60,11 @@ For an app that is already installed through PlayCover:
 macver/inject_installed.sh
 ```
 
-The injection script creates a timestamped backup beside the installed app,
-adds `@executable_path/Frameworks/PCMacProbe.dylib` to the main executable,
-and ad-hoc signs the modified bundle.
+The injection script waits for PlayChain account writeback, creates a
+timestamped backup beside the installed app (including the `.keyCover` database
+and game preferences), preserves the PlayCover executable entitlements, adds
+`@executable_path/Frameworks/PCMacProbe.dylib`, and ad-hoc signs the modified
+bundle.
 
 ## End-user package
 
@@ -68,10 +88,14 @@ macver/package_complete_release.sh
 
 ## Runtime verification
 
+Start the game from the PlayCover library, then run:
+
 ```sh
-open "$HOME/Library/Containers/io.playcover.PlayCover/Applications/jp.co.bandainamcoent.BNEI0442.app"
 macver/check_logs.sh
 ```
+
+Do not open the `.app` inside PlayCover's container directly. Direct launch
+bypasses PlayChain account-data unlock/writeback.
 
 Logs are written under `Library/Caches/PCMacProbe` in the app container.
 

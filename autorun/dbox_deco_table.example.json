@@ -1,0 +1,11 @@
+{
+  "_comment": "Optional 异次元 box deco value table for 加成 ranking. Copy to dbox_deco_table.json. option: 1=DataFragment 2=Collect (E_DBOX_DECO_OPTION_TYPE). value = percent points stacked by GetTotalDecoOptionRatio.",
+  "1": { "option": 1, "value": 0 },
+  "9": { "option": 1, "value": 0 },
+  "10": { "option": 1, "value": 0 },
+  "11": { "option": 2, "value": 0 },
+  "12": { "option": 1, "value": 0 },
+  "14": { "option": 2, "value": 0 },
+  "15": { "option": 1, "value": 0 },
+  "16": { "option": 2, "value": 0 }
+}

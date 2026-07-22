@@ -14,13 +14,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from client.account_store import apply_account_to_config, import_input_file, load_account_file
 from client.qmd_auto import run_auto_once
 from client.farm import FarmConfig, FarmRunner
+from client.item_spawner_care import run_zb
 from client.heartbeat import HeartbeatService
-from client.runtime_state import STATE
+from client.runtime_state import STATE, ui_stage_no
 from client.session import GameSession
 from client.tui import FarmTUI
 
 DUMP_PATH = "last_run.json"
 STATS_PATH = "drop_stats.json"
+
+
+def cmd_ts() -> int:
+    """Interactive Textual TUI for 数码世界 / 探索 (alias: mine)."""
+    try:
+        from client.mine_tui import run_mine_tui
+    except ImportError as exc:
+        print("[-] Textual is required for ts TUI: pip install textual")
+        print(f"    detail: {exc}")
+        return 2
+    session = _load_session()
+    session.client.log_enabled = False
+    print("[*] ts (数码世界): login then click cells (drill / dash / claim)")
+    return run_mine_tui(session, http_log=False)
+
 
 
 def _load_session() -> GameSession:
@@ -102,9 +118,11 @@ def cmd_runloop() -> int:
         login_stage = int(info.get("_stage") or acc.capture_stage)
         login_sector = max(1, int(info.get("_sector") or acc.capture_sector or 1))
         login_region = int(info.get("_region") or acc.capture_region or 1)
+        login_repeat = int(info.get("_repeat") or 0)
         print(
             f"[*] runloop: TUI + infinite stay on login frontier "
-            f"{login_stage}-{login_sector} region={login_region}"
+            f"{login_stage}-{login_sector} region={login_region} "
+            f"repeat={login_repeat} ui_stage={ui_stage_no(login_stage, login_sector, login_repeat)}"
         )
 
         cfg = FarmConfig(
@@ -166,6 +184,56 @@ def cmd_runloop() -> int:
         print(f"[*] wrote {dump_path}")
 
 
+
+def cmd_zb(
+    *,
+    batches: int | None = None,
+    total: int = 1000,
+    count: int | None = None,
+    info_only: bool = False,
+    filter_grade: int = 0,
+    filter_match: int = 0,
+) -> int:
+    """One-shot 开装备 (default open 1000 items then stop). Furnace care is in auto."""
+    session = _load_session()
+    session.client.log_enabled = True
+    result: dict = {"ok": False, "mode": "zb"}
+
+    try:
+        pipe = session.run_login_pipeline()
+        result["login"] = {
+            "session_key": session.client.session_key,
+            "public_uid": session.auth_info.get("_publicUid"),
+            "server_num": session.auth_info.get("_serverNum"),
+        }
+        print(
+            f"[+] login ok uid={result['login']['public_uid']} "
+            f"server={result['login']['server_num']}"
+        )
+        stats = run_zb(
+            session,
+            batches=0 if info_only else batches,
+            total=None if info_only else int(total),
+            count=count,
+            info_only=bool(info_only),
+            filter_grade=int(filter_grade),
+            filter_match_count=int(filter_match),
+            log=print,
+        )
+        result.update(stats)
+    except Exception as exc:
+        result["error"] = str(exc)
+        print(f"[-] zb crashed: {exc}")
+        traceback.print_exc()
+    finally:
+        dump_path = Path("last_zb.json")
+        dump_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[*] wrote {dump_path}")
+
+    return 0 if result.get("ok") else 1
+
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="main.py",
@@ -179,8 +247,43 @@ def main() -> int:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("runloop", "auto"),
-        help="runloop: stage farm; auto: one-shot farm+lab+mine+dbox+qmd+afk",
+        choices=("runloop", "auto", "ts", "mine", "zb"),
+        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备",
+    )
+    parser.add_argument(
+        "--total",
+        type=int,
+        default=1000,
+        help="zb: total items to open then stop (default 1000)",
+    )
+    parser.add_argument(
+        "--batches",
+        type=int,
+        default=None,
+        help="zb: batch times override (if set, ignores --total)",
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=None,
+        help="zb: items per batch (default: GameData SpawnCount, e.g. 8 at lv17)",
+    )
+    parser.add_argument(
+        "--info",
+        action="store_true",
+        help="zb: only print furnace info + bit cost, no spawn",
+    )
+    parser.add_argument(
+        "--filter-grade",
+        type=int,
+        default=0,
+        help="zb: _filterGrade for spawn-and-sell (default 0)",
+    )
+    parser.add_argument(
+        "--filter-match",
+        type=int,
+        default=0,
+        help="zb: _filterMatchCount for spawn-and-sell (default 0)",
     )
     args = parser.parse_args()
 
@@ -191,12 +294,29 @@ def main() -> int:
         return cmd_runloop()
     if args.command == "auto":
         return cmd_auto()
+    if args.command in ("ts", "mine"):
+        return cmd_ts()
+    if args.command == "zb":
+        return cmd_zb(
+            batches=args.batches,
+            total=int(args.total if args.total is not None else 1000),
+            count=args.count,
+            info_only=bool(args.info),
+            filter_grade=int(args.filter_grade or 0),
+            filter_match=int(args.filter_match or 0),
+        )
 
     parser.print_help()
     print("\nExamples:")
     print("  python3 main.py --input capture.chlsj")
     print("  python3 main.py runloop")
     print("  python3 main.py auto")
+    print("  python3 main.py ts")
+    print("  python3 main.py zb")
+    print("  python3 main.py zb --info")
+    print("  python3 main.py zb --total 1000")
+    print("  python3 main.py zb --batches 3")
+    print("  python3 main.py zb --count 8 --batches 1")
     return 2
 
 

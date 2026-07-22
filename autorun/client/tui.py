@@ -48,7 +48,7 @@ def build_dashboard(state: RuntimeState) -> Layout:
     )
     layout["left"].split_column(
         Layout(name="session", size=9),
-        Layout(name="target", size=8),
+        Layout(name="target", size=9),
         Layout(name="drops", ratio=1),
     )
     layout["right"].split_column(
@@ -56,10 +56,13 @@ def build_dashboard(state: RuntimeState) -> Layout:
         Layout(name="events", ratio=1),
     )
 
+    ui_stage = int(snap.get("ui_stage") or 0)
+    stage_label = f"{ui_stage}关" if ui_stage else "-"
+
     title = Text("DIGIMON UP  ·  Protocol Client", style="bold white")
     sub = Text(
-        f"mode={snap['mode']}  status={snap['status']}  recover={snap['recover']}",
-        style="dim",
+        f"关卡 {stage_label}   mode={snap['mode']}  status={snap['status']}  recover={snap['recover']}",
+        style="bold yellow" if ui_stage else "dim",
     )
     layout["header"].update(
         Panel(Align.center(Group(title, sub)), box=box.HEAVY, style="blue")
@@ -77,14 +80,20 @@ def build_dashboard(state: RuntimeState) -> Layout:
     ]
     layout["session"].update(Panel(_kv_table(session_rows), title="Session", border_style="cyan"))
 
+    # 游戏内关卡号 = maxStage*maxSector*repeat + maxSector*(stage-1) + sector
+    # 主线 60 stage × 10 sector；例 stage=31 sector=4 repeat=1 → 904关
     target_rows = [
-        ("Region", snap["region"]),
-        ("Stage", snap["stage"]),
-        ("Sector", snap["sector"]),
-        ("Repeat", snap["repeat"]),
+        ("关卡", stage_label),
+        (
+            "协议",
+            f"r{snap['region']} stage={snap['stage']} "
+            f"sector={snap['sector']} repeat={snap['repeat']}",
+        ),
         ("Last drops", snap["last_drops"] or "-"),
     ]
-    layout["target"].update(Panel(_kv_table(target_rows), title="Current Stage", border_style="green"))
+    layout["target"].update(
+        Panel(_kv_table(target_rows), title=f"Current · {stage_label}", border_style="green")
+    )
 
     drop_table = Table(expand=True, box=box.SIMPLE_HEAVY)
     drop_table.add_column("Item", style="yellow")

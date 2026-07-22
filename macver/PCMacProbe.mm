@@ -15,8 +15,10 @@
 #import <errno.h>
 #import <pthread.h>
 #import <sys/time.h>
+#import <execinfo.h>
 #include <atomic>
 #include <math.h>
+#include <typeinfo>
 #import "dobby.h"
 
 static __thread bool gInLog;
@@ -120,8 +122,197 @@ static void PCUntrackProjectilePool(void *pool) {
 static pthread_mutex_t gPersistentLogLock = PTHREAD_MUTEX_INITIALIZER;
 static int gPersistentLogFD = -1;
 static int gUnityNativeLogFD = -1;
+static int gUnityCrashHistoryFD = -1;
 static NSString *gPersistentLogPath;
 static NSString *gUnityNativeLogPath;
+static NSString *gUnityCrashHistoryPath;
+
+typedef struct {
+    bool valid;
+    struct timeval capturedAt;
+    void *wrapper;
+    void *managedException;
+    char exceptionClass[192];
+    char message[1024];
+    char managedStack[3072];
+    void *nativeFrames[48];
+    int nativeFrameCount;
+} PCManagedThrowSnapshot;
+
+static __thread PCManagedThrowSnapshot gLastManagedThrow;
+static __thread bool gInCxaThrowProbe;
+
+static bool PCReadableRange(const void *pointer, size_t length) {
+    if (!pointer || length == 0) return false;
+    uintptr_t start = (uintptr_t)pointer;
+    uintptr_t end = start + length - 1;
+    if (end < start) return false;
+    uint8_t probe = 0;
+    vm_size_t bytesRead = 0;
+    kern_return_t result = vm_read_overwrite(
+        mach_task_self(), (vm_address_t)start, 1, (vm_address_t)&probe,
+        &bytesRead);
+    if (result != KERN_SUCCESS || bytesRead != 1) return false;
+    if (end == start) return true;
+    bytesRead = 0;
+    result = vm_read_overwrite(
+        mach_task_self(), (vm_address_t)end, 1, (vm_address_t)&probe,
+        &bytesRead);
+    return result == KERN_SUCCESS && bytesRead == 1;
+}
+
+static size_t PCUTF8FromIl2CppString(const void *value, char *output,
+                                    size_t outputSize) {
+    if (!output || outputSize == 0) return 0;
+    output[0] = '\0';
+    if (!PCReadableRange(value, offsetof(PCIl2CppString, chars))) return 0;
+    const PCIl2CppString *string = (const PCIl2CppString *)value;
+    int32_t length = string->length;
+    if (length < 0 || length > 32768 ||
+        !PCReadableRange(string->chars, (size_t)length * sizeof(unichar))) {
+        return 0;
+    }
+
+    size_t written = 0;
+    for (int32_t index = 0; index < length && written + 1 < outputSize; index++) {
+        uint32_t codepoint = string->chars[index];
+        if (codepoint >= 0xD800 && codepoint <= 0xDBFF && index + 1 < length) {
+            uint32_t low = string->chars[index + 1];
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                codepoint = 0x10000 + ((codepoint - 0xD800) << 10) +
+                            (low - 0xDC00);
+                index++;
+            }
+        }
+
+        char encoded[4] = {};
+        size_t encodedLength = 0;
+        if (codepoint <= 0x7F) {
+            encoded[0] = (char)codepoint;
+            encodedLength = 1;
+        } else if (codepoint <= 0x7FF) {
+            encoded[0] = (char)(0xC0 | (codepoint >> 6));
+            encoded[1] = (char)(0x80 | (codepoint & 0x3F));
+            encodedLength = 2;
+        } else if (codepoint <= 0xFFFF) {
+            encoded[0] = (char)(0xE0 | (codepoint >> 12));
+            encoded[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+            encoded[2] = (char)(0x80 | (codepoint & 0x3F));
+            encodedLength = 3;
+        } else {
+            encoded[0] = (char)(0xF0 | (codepoint >> 18));
+            encoded[1] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+            encoded[2] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+            encoded[3] = (char)(0x80 | (codepoint & 0x3F));
+            encodedLength = 4;
+        }
+        if (written + encodedLength >= outputSize) break;
+        memcpy(output + written, encoded, encodedLength);
+        written += encodedLength;
+    }
+    output[written] = '\0';
+    return written;
+}
+
+static void PCCopyReadableCString(const char *value, char *output,
+                                  size_t outputSize) {
+    if (!output || outputSize == 0) return;
+    output[0] = '\0';
+    if (!value) return;
+    size_t index = 0;
+    while (index + 1 < outputSize && PCReadableRange(value + index, 1)) {
+        char character = value[index];
+        if (!character) break;
+        output[index++] = character;
+    }
+    output[index] = '\0';
+}
+
+static void PCDescribeManagedException(void *exception, char *exceptionClass,
+                                       size_t classSize, char *message,
+                                       size_t messageSize, char *stack,
+                                       size_t stackSize) {
+    if (classSize) exceptionClass[0] = '\0';
+    if (messageSize) message[0] = '\0';
+    if (stackSize) stack[0] = '\0';
+    if (!PCReadableRange(exception, 0x48)) return;
+
+    uint8_t *object = (uint8_t *)exception;
+    void *klass = *(void **)object;
+    void *classNameString = *(void **)(object + 0x10);
+    void *messageString = *(void **)(object + 0x18);
+    void *stackString = *(void **)(object + 0x40);
+
+    PCUTF8FromIl2CppString(classNameString, exceptionClass, classSize);
+    PCUTF8FromIl2CppString(messageString, message, messageSize);
+    PCUTF8FromIl2CppString(stackString, stack, stackSize);
+
+    if (!exceptionClass[0] && PCReadableRange(klass, 0x20)) {
+        const char *className = *(const char **)((uint8_t *)klass + 0x10);
+        const char *nameSpace = *(const char **)((uint8_t *)klass + 0x18);
+        char rawClass[128] = {};
+        char rawNamespace[64] = {};
+        PCCopyReadableCString(className, rawClass, sizeof(rawClass));
+        PCCopyReadableCString(nameSpace, rawNamespace, sizeof(rawNamespace));
+        if (rawNamespace[0]) {
+            snprintf(exceptionClass, classSize, "%s.%s", rawNamespace, rawClass);
+        } else if (rawClass[0]) {
+            snprintf(exceptionClass, classSize, "%s", rawClass);
+        }
+    }
+    if (!exceptionClass[0]) snprintf(exceptionClass, classSize, "(unknown)");
+    if (!message[0]) snprintf(message, messageSize, "(no message)");
+    if (!stack[0]) snprintf(stack, stackSize, "(managed stack unavailable)");
+}
+
+static void PCWriteAll(int fileDescriptor, const char *bytes, size_t length) {
+    if (fileDescriptor < 0 || !bytes || length == 0) return;
+    while (length > 0) {
+        ssize_t written = write(fileDescriptor, bytes, length);
+        if (written <= 0) return;
+        bytes += written;
+        length -= (size_t)written;
+    }
+}
+
+static void PCAppendRawCrashLine(const char *message, bool includePersistent) {
+    if (!message) return;
+    struct timeval value = {};
+    gettimeofday(&value, nullptr);
+    struct tm localTime = {};
+    localtime_r(&value.tv_sec, &localTime);
+    char line[8192] = {};
+    int length = snprintf(
+        line, sizeof(line),
+        "%04d-%02d-%02d %02d:%02d:%02d.%03d pid=%d #pc  %s\n",
+        localTime.tm_year + 1900, localTime.tm_mon + 1, localTime.tm_mday,
+        localTime.tm_hour, localTime.tm_min, localTime.tm_sec,
+        (int)(value.tv_usec / 1000), getpid(), message);
+    if (length <= 0) return;
+    size_t safeLength = MIN((size_t)length, sizeof(line) - 1);
+    pthread_mutex_lock(&gPersistentLogLock);
+    if (includePersistent) {
+        PCWriteAll(gPersistentLogFD, line, safeLength);
+    }
+    PCWriteAll(gUnityCrashHistoryFD, line, safeLength);
+    pthread_mutex_unlock(&gPersistentLogLock);
+}
+
+static void PCAppendManagedExceptionReport(const char *source, void *exception,
+                                           bool terminating) {
+    char exceptionClass[192] = {};
+    char message[1024] = {};
+    char stack[3072] = {};
+    PCDescribeManagedException(exception, exceptionClass, sizeof(exceptionClass),
+                               message, sizeof(message), stack, sizeof(stack));
+    char report[6144] = {};
+    snprintf(report, sizeof(report),
+             "UnityCrash.Managed source=%s terminating=%d exception=%p "
+             "class=%s message=%s stack=%s",
+             source ?: "(unknown)", terminating ? 1 : 0, exception,
+             exceptionClass, message, stack);
+    PCAppendRawCrashLine(report, true);
+}
 
 static NSString *PCTimestamp(void) {
     struct timeval value = {};
@@ -195,10 +386,26 @@ static void PCInitializePersistentLogs(void) {
             [manager moveItemAtPath:gUnityNativeLogPath toPath:nativePrevious error:nil];
         }
 
+        gUnityCrashHistoryPath =
+            [directory stringByAppendingPathComponent:@"UnityCrash-history.log"];
+        NSDictionary<NSFileAttributeKey, id> *crashAttributes =
+            [manager attributesOfItemAtPath:gUnityCrashHistoryPath error:nil];
+        if ([crashAttributes fileSize] > 4 * 1024 * 1024) {
+            NSString *crashPrevious =
+                [directory stringByAppendingPathComponent:@"UnityCrash-previous.log"];
+            [manager removeItemAtPath:crashPrevious error:nil];
+            [manager moveItemAtPath:gUnityCrashHistoryPath
+                             toPath:crashPrevious
+                              error:nil];
+        }
+
         gPersistentLogFD = open(gPersistentLogPath.fileSystemRepresentation,
                                 O_CREAT | O_WRONLY | O_APPEND, 0644);
         gUnityNativeLogFD = open(gUnityNativeLogPath.fileSystemRepresentation,
                                 O_CREAT | O_WRONLY | O_APPEND, 0644);
+        gUnityCrashHistoryFD =
+            open(gUnityCrashHistoryPath.fileSystemRepresentation,
+                 O_CREAT | O_WRONLY | O_APPEND, 0644);
         if (gUnityNativeLogFD >= 0) {
             dup2(gUnityNativeLogFD, STDOUT_FILENO);
             dup2(gUnityNativeLogFD, STDERR_FILENO);
@@ -213,6 +420,12 @@ static void PCInitializePersistentLogs(void) {
 // MARK: - Game speed and in-game overlay
 
 static NSString *const PCSpeedDefaultsKey = @"PCMacProbe.speedScale";
+static NSString *const PCFloatingEdgeLeftKey = @"PCMacProbe.floatingEdgeLeft";
+static NSString *const PCFloatingYRatioKey = @"PCMacProbe.floatingYRatio";
+static const NSTimeInterval kPCFloatingCollapseDelay = 2.5;
+static const CGFloat kPCFloatingButtonSize = 54.0;
+static const CGFloat kPCFloatingCollapsedVisible = 0.40;
+static const CGFloat kPCFloatingCollapsedAlpha = 0.45;
 static std::atomic<float> gSpeedScale { 1.0f };
 static std::atomic<bool> gLoggedFirstSpeedIntercept { false };
 static void (*orig_setTimeScale)(float);
@@ -259,6 +472,10 @@ static void pc_setTimeScale(float requestedScale) {
 @property(nonatomic, strong) UILabel *speedLabel;
 @property(nonatomic, strong) UISlider *speedSlider;
 @property(nonatomic, weak) UIWindow *hostWindow;
+@property(nonatomic, assign) BOOL floatingButtonWasDragged;
+@property(nonatomic, assign) BOOL floatingCollapsed;
+@property(nonatomic, assign) BOOL floatingPreferLeft;
+@property(nonatomic, assign) NSUInteger floatingDockGeneration;
 + (instancetype)sharedOverlay;
 - (void)installWhenReady;
 @end
@@ -313,16 +530,15 @@ static void pc_setTimeScale(float requestedScale) {
     if (self.hostWindow == window && self.floatingButton.superview == window) {
         [window bringSubviewToFront:self.panel];
         [window bringSubviewToFront:self.floatingButton];
+        if (self.panel.hidden) {
+            [self scheduleFloatingCollapse];
+        }
         return;
     }
 
     [self.panel removeFromSuperview];
     [self.floatingButton removeFromSuperview];
     self.hostWindow = window;
-
-    UIEdgeInsets safe = window.safeAreaInsets;
-    CGFloat width = CGRectGetWidth(window.bounds);
-    CGFloat height = CGRectGetHeight(window.bounds);
 
     UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 280, 170)];
     panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
@@ -392,11 +608,14 @@ static void pc_setTimeScale(float requestedScale) {
     button.titleLabel.font = [UIFont boldSystemFontOfSize:14.0];
     button.accessibilityLabel = @"打开插件面板";
     button.accessibilityIdentifier = @"PCMacProbe.floatingButton";
-    [button addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
+    [button addTarget:self action:@selector(floatingButtonTouchDown:)
+       forControlEvents:UIControlEventTouchDown];
+    [button addTarget:self action:@selector(floatingButtonTapped:)
+       forControlEvents:UIControlEventTouchUpInside];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
         initWithTarget:self action:@selector(dragFloatingButton:)];
-    pan.cancelsTouchesInView = NO;
+    pan.cancelsTouchesInView = YES;
     [button addGestureRecognizer:pan];
 
     self.panel = panel;
@@ -404,17 +623,172 @@ static void pc_setTimeScale(float requestedScale) {
     [window addSubview:panel];
     [window addSubview:button];
 
-    CGFloat buttonX = MAX(safe.left + 8.0, width - safe.right - 62.0);
-    CGFloat buttonY = MIN(MAX(safe.top + 72.0, 72.0), height - safe.bottom - 62.0);
-    button.frame = CGRectMake(buttonX, buttonY, 54, 54);
+    button.frame = CGRectMake(0, 0, kPCFloatingButtonSize, kPCFloatingButtonSize);
+    self.floatingCollapsed = NO;
+    [self restoreFloatingButtonPositionAnimated:NO collapsed:NO];
     [self positionPanel];
     [self refreshSpeedUI];
+    [self scheduleFloatingCollapse];
 
     // Applying here is safe: a foreground game window means Unity has passed
     // its early initialization phase. It also restores the persisted speed.
     PCSetSpeed(PCCurrentSpeed(), false, true);
-    NSLog(@"#pc  speed overlay installed window=%p bounds=%@",
-          window, NSStringFromCGRect(window.bounds));
+    NSLog(@"#pc  speed overlay installed window=%p bounds=%@ edgeLeft=%d",
+          window, NSStringFromCGRect(window.bounds), self.floatingPreferLeft ? 1 : 0);
+}
+
+- (BOOL)isPluginPanelVisible {
+    return self.panel && !self.panel.hidden;
+}
+
+- (CGRect)floatingDragBoundsCollapsed:(BOOL)collapsed {
+    UIWindow *window = self.hostWindow;
+    if (!window) return CGRectZero;
+    UIEdgeInsets safe = window.safeAreaInsets;
+    CGFloat half = kPCFloatingButtonSize * 0.5;
+    CGFloat minY = safe.top + half + 6.0;
+    CGFloat maxY = CGRectGetHeight(window.bounds) - safe.bottom - half - 6.0;
+    if (maxY < minY) {
+        minY = half + 6.0;
+        maxY = CGRectGetHeight(window.bounds) - half - 6.0;
+    }
+    CGFloat minX;
+    CGFloat maxX;
+    if (collapsed) {
+        CGFloat visible = kPCFloatingButtonSize * kPCFloatingCollapsedVisible;
+        minX = visible - half;
+        maxX = CGRectGetWidth(window.bounds) - (visible - half);
+    } else {
+        minX = safe.left + half + 6.0;
+        maxX = CGRectGetWidth(window.bounds) - safe.right - half - 6.0;
+    }
+    if (maxX < minX) {
+        minX = half;
+        maxX = CGRectGetWidth(window.bounds) - half;
+    }
+    return CGRectMake(minX, minY, maxX - minX, maxY - minY);
+}
+
+- (CGPoint)clampFloatingCenter:(CGPoint)center collapsed:(BOOL)collapsed {
+    CGRect box = [self floatingDragBoundsCollapsed:collapsed];
+    center.x = MIN(MAX(center.x, CGRectGetMinX(box)), CGRectGetMaxX(box));
+    center.y = MIN(MAX(center.y, CGRectGetMinY(box)), CGRectGetMaxY(box));
+    return center;
+}
+
+- (CGPoint)edgeCenterPreferLeft:(BOOL)preferLeft
+                              y:(CGFloat)y
+                      collapsed:(BOOL)collapsed {
+    CGRect box = [self floatingDragBoundsCollapsed:collapsed];
+    CGPoint center;
+    center.x = preferLeft ? CGRectGetMinX(box) : CGRectGetMaxX(box);
+    center.y = y;
+    return [self clampFloatingCenter:center collapsed:collapsed];
+}
+
+- (void)saveFloatingButtonPosition {
+    UIButton *button = self.floatingButton;
+    UIWindow *window = self.hostWindow;
+    if (!button || !window) return;
+    CGRect box = [self floatingDragBoundsCollapsed:NO];
+    CGFloat span = MAX(1.0, CGRectGetHeight(box));
+    CGFloat yRatio = (button.center.y - CGRectGetMinY(box)) / span;
+    yRatio = MIN(MAX(yRatio, 0.0), 1.0);
+    BOOL preferLeft = button.center.x < CGRectGetMidX(window.bounds);
+    self.floatingPreferLeft = preferLeft;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults setBool:preferLeft forKey:PCFloatingEdgeLeftKey];
+    [defaults setDouble:yRatio forKey:PCFloatingYRatioKey];
+}
+
+- (void)restoreFloatingButtonPositionAnimated:(BOOL)animated
+                                    collapsed:(BOOL)collapsed {
+    UIButton *button = self.floatingButton;
+    UIWindow *window = self.hostWindow;
+    if (!button || !window) return;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    BOOL hasSaved = [defaults objectForKey:PCFloatingYRatioKey] != nil;
+    BOOL preferLeft = hasSaved ? [defaults boolForKey:PCFloatingEdgeLeftKey] : NO;
+    CGFloat yRatio = hasSaved ? [defaults doubleForKey:PCFloatingYRatioKey] : 0.18;
+    yRatio = MIN(MAX(yRatio, 0.0), 1.0);
+    self.floatingPreferLeft = preferLeft;
+    CGRect box = [self floatingDragBoundsCollapsed:NO];
+    CGFloat y = CGRectGetMinY(box) + yRatio * MAX(1.0, CGRectGetHeight(box));
+    CGPoint center = [self edgeCenterPreferLeft:preferLeft y:y collapsed:collapsed];
+    self.floatingCollapsed = collapsed;
+    void (^apply)(void) = ^{
+        button.center = center;
+        button.alpha = collapsed ? kPCFloatingCollapsedAlpha : 1.0;
+    };
+    if (animated) {
+        [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:apply completion:nil];
+    } else {
+        apply();
+    }
+}
+
+- (void)cancelFloatingCollapse {
+    self.floatingDockGeneration += 1;
+}
+
+- (void)scheduleFloatingCollapse {
+    if (!self.floatingButton || [self isPluginPanelVisible]) {
+        [self cancelFloatingCollapse];
+        return;
+    }
+    NSUInteger generation = ++self.floatingDockGeneration;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kPCFloatingCollapseDelay * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
+            if (generation != self.floatingDockGeneration) return;
+            if ([self isPluginPanelVisible]) return;
+            [self setFloatingCollapsed:YES animated:YES];
+        });
+}
+
+- (void)setFloatingCollapsed:(BOOL)collapsed animated:(BOOL)animated {
+    UIButton *button = self.floatingButton;
+    UIWindow *window = self.hostWindow;
+    if (!button || !window) return;
+    BOOL preferLeft = self.floatingPreferLeft;
+    if (!collapsed || !self.floatingCollapsed) {
+        preferLeft = button.center.x < CGRectGetMidX(window.bounds);
+        self.floatingPreferLeft = preferLeft;
+    }
+    CGPoint center = [self edgeCenterPreferLeft:preferLeft y:button.center.y collapsed:collapsed];
+    self.floatingCollapsed = collapsed;
+    void (^apply)(void) = ^{
+        button.center = center;
+        button.alpha = collapsed ? kPCFloatingCollapsedAlpha : 1.0;
+    };
+    if (animated) {
+        [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:apply completion:nil];
+    } else {
+        apply();
+    }
+    if (!collapsed) {
+        [self saveFloatingButtonPosition];
+    }
+}
+
+- (void)snapFloatingButtonToEdgeAndSave {
+    UIButton *button = self.floatingButton;
+    UIWindow *window = self.hostWindow;
+    if (!button || !window) return;
+    BOOL preferLeft = button.center.x < CGRectGetMidX(window.bounds);
+    self.floatingPreferLeft = preferLeft;
+    self.floatingCollapsed = NO;
+    CGPoint center = [self edgeCenterPreferLeft:preferLeft y:button.center.y collapsed:NO];
+    [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        button.center = center;
+        button.alpha = 1.0;
+    } completion:^(__unused BOOL finished) {
+        [self saveFloatingButtonPosition];
+        [self scheduleFloatingCollapse];
+    }];
 }
 
 - (void)positionPanel {
@@ -440,12 +814,17 @@ static void pc_setTimeScale(float requestedScale) {
 }
 
 - (void)togglePanel {
-    self.panel.hidden = !self.panel.hidden;
-    if (!self.panel.hidden) {
+    BOOL willShow = self.panel.hidden;
+    self.panel.hidden = !willShow;
+    if (willShow) {
+        [self cancelFloatingCollapse];
+        [self setFloatingCollapsed:NO animated:YES];
         [self positionPanel];
         [self refreshSpeedUI];
         [self.hostWindow bringSubviewToFront:self.panel];
         [self.hostWindow bringSubviewToFront:self.floatingButton];
+    } else {
+        [self scheduleFloatingCollapse];
     }
 }
 
@@ -458,24 +837,51 @@ static void pc_setTimeScale(float requestedScale) {
     [self refreshSpeedUI];
 }
 
+- (void)floatingButtonTouchDown:(UIButton *)sender {
+    self.floatingButtonWasDragged = NO;
+    [self cancelFloatingCollapse];
+    if (self.floatingCollapsed) {
+        [self setFloatingCollapsed:NO animated:YES];
+    } else {
+        sender.alpha = 1.0;
+    }
+}
+
+- (void)floatingButtonTapped:(UIButton *)sender {
+    if (self.floatingButtonWasDragged) {
+        self.floatingButtonWasDragged = NO;
+        [self scheduleFloatingCollapse];
+        return;
+    }
+    [self togglePanel];
+}
+
 - (void)dragFloatingButton:(UIPanGestureRecognizer *)recognizer {
     UIView *button = recognizer.view;
     UIWindow *window = self.hostWindow;
     if (!button || !window) return;
+    if (recognizer.state == UIGestureRecognizerStateBegan) {
+        self.floatingButtonWasDragged = YES;
+        [self cancelFloatingCollapse];
+        if (self.floatingCollapsed) {
+            [self setFloatingCollapsed:NO animated:NO];
+        }
+        button.alpha = 1.0;
+    } else if (recognizer.state == UIGestureRecognizerStateChanged) {
+        self.floatingButtonWasDragged = YES;
+    }
     CGPoint translation = [recognizer translationInView:window];
     CGPoint center = button.center;
     center.x += translation.x;
     center.y += translation.y;
     [recognizer setTranslation:CGPointZero inView:window];
-
-    UIEdgeInsets safe = window.safeAreaInsets;
-    CGFloat halfWidth = CGRectGetWidth(button.bounds) * 0.5;
-    CGFloat halfHeight = CGRectGetHeight(button.bounds) * 0.5;
-    center.x = MIN(MAX(center.x, safe.left + halfWidth + 6.0),
-                   CGRectGetWidth(window.bounds) - safe.right - halfWidth - 6.0);
-    center.y = MIN(MAX(center.y, safe.top + halfHeight + 6.0),
-                   CGRectGetHeight(window.bounds) - safe.bottom - halfHeight - 6.0);
-    button.center = center;
+    button.center = [self clampFloatingCenter:center collapsed:NO];
+    button.alpha = 1.0;
+    self.floatingCollapsed = NO;
+    if (recognizer.state == UIGestureRecognizerStateEnded ||
+        recognizer.state == UIGestureRecognizerStateCancelled) {
+        [self snapFloatingButtonToEdgeAndSave];
+    }
 }
 
 @end
@@ -711,8 +1117,120 @@ static int pc_ptrace(int request, pid_t pid, caddr_t address, int data) {
 
 // MARK: - termination probes
 
+typedef void (*PCCxaThrowFunction)(void *, std::type_info *, void (*)(void *));
+static PCCxaThrowFunction orig_cxa_throw;
+
+static void pc_cxa_throw(void *exceptionObject, std::type_info *typeInfo,
+                         void (*destructor)(void *)) __attribute__((noreturn));
+static void pc_cxa_throw(void *exceptionObject, std::type_info *typeInfo,
+                         void (*destructor)(void *)) {
+    if (!gInCxaThrowProbe) {
+        gInCxaThrowProbe = true;
+        const char *typeName = typeInfo ? typeInfo->name() : nullptr;
+        if (typeName && strstr(typeName, "Il2CppExceptionWrapper")) {
+            memset(&gLastManagedThrow, 0, sizeof(gLastManagedThrow));
+            gLastManagedThrow.valid = true;
+            gettimeofday(&gLastManagedThrow.capturedAt, nullptr);
+            gLastManagedThrow.wrapper = exceptionObject;
+            if (PCReadableRange(exceptionObject, sizeof(void *))) {
+                gLastManagedThrow.managedException = *(void **)exceptionObject;
+            }
+            PCDescribeManagedException(
+                gLastManagedThrow.managedException,
+                gLastManagedThrow.exceptionClass,
+                sizeof(gLastManagedThrow.exceptionClass),
+                gLastManagedThrow.message, sizeof(gLastManagedThrow.message),
+                gLastManagedThrow.managedStack,
+                sizeof(gLastManagedThrow.managedStack));
+            gLastManagedThrow.nativeFrameCount =
+                backtrace(gLastManagedThrow.nativeFrames,
+                          (int)(sizeof(gLastManagedThrow.nativeFrames) /
+                                sizeof(gLastManagedThrow.nativeFrames[0])));
+        }
+        gInCxaThrowProbe = false;
+    }
+    orig_cxa_throw(exceptionObject, typeInfo, destructor);
+    __builtin_unreachable();
+}
+
+static void PCAppendNativeFrames(const char *label, void *const *frames,
+                                 int frameCount) {
+    for (int index = 0; index < frameCount; index++) {
+        Dl_info info = {};
+        uintptr_t address = (uintptr_t)frames[index];
+        const char *image = "(unknown)";
+        const char *symbol = "(unknown)";
+        uintptr_t offset = address;
+        uintptr_t symbolOffset = 0;
+        if (dladdr(frames[index], &info)) {
+            if (info.dli_fname) {
+                const char *slash = strrchr(info.dli_fname, '/');
+                image = slash ? slash + 1 : info.dli_fname;
+            }
+            if (info.dli_sname) symbol = info.dli_sname;
+            if (info.dli_fbase) offset = address - (uintptr_t)info.dli_fbase;
+            if (info.dli_saddr) {
+                symbolOffset = address - (uintptr_t)info.dli_saddr;
+            }
+        }
+        char line[1024] = {};
+        snprintf(line, sizeof(line),
+                 "UnityCrash.%s_frame index=%d address=%p image=%s "
+                 "offset=0x%lx symbol=%s symbol_offset=0x%lx",
+                 label, index, frames[index], image, (unsigned long)offset,
+                 symbol, (unsigned long)symbolOffset);
+        PCAppendRawCrashLine(line, true);
+    }
+}
+
+static void PCAppendLastManagedThrow(void) {
+    if (!gLastManagedThrow.valid) {
+        PCAppendRawCrashLine("UnityCrash.LastManagedThrow available=0", true);
+        return;
+    }
+    struct timeval now = {};
+    gettimeofday(&now, nullptr);
+    double age = (double)(now.tv_sec - gLastManagedThrow.capturedAt.tv_sec) +
+                 (double)(now.tv_usec -
+                          gLastManagedThrow.capturedAt.tv_usec) /
+                     1000000.0;
+    char report[6144] = {};
+    snprintf(report, sizeof(report),
+             "UnityCrash.LastManagedThrow available=1 age=%.3fs wrapper=%p "
+             "exception=%p class=%s message=%s stack=%s",
+             age, gLastManagedThrow.wrapper,
+             gLastManagedThrow.managedException,
+             gLastManagedThrow.exceptionClass,
+             gLastManagedThrow.message,
+             gLastManagedThrow.managedStack);
+    PCAppendRawCrashLine(report, true);
+    PCAppendNativeFrames("throw", gLastManagedThrow.nativeFrames,
+                         gLastManagedThrow.nativeFrameCount);
+}
+
+static void PCAppendTerminationReport(const char *reason) {
+    char header[512] = {};
+    snprintf(header, sizeof(header),
+             "UnityCrash.Termination reason=%s thread=%p",
+             reason ?: "(unknown)", (void *)pthread_self());
+    PCAppendRawCrashLine(header, true);
+    PCAppendLastManagedThrow();
+    void *frames[48] = {};
+    int frameCount =
+        backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
+    PCAppendNativeFrames("termination", frames, frameCount);
+    pthread_mutex_lock(&gPersistentLogLock);
+    if (gPersistentLogFD >= 0) fsync(gPersistentLogFD);
+    if (gUnityCrashHistoryFD >= 0) fsync(gUnityCrashHistoryFD);
+    if (gUnityNativeLogFD >= 0) fsync(gUnityNativeLogFD);
+    pthread_mutex_unlock(&gPersistentLogLock);
+}
+
 static void (*orig_exit)(int);
 static void pc_exit(int status) {
+    char reason[64] = {};
+    snprintf(reason, sizeof(reason), "exit status=%d", status);
+    PCAppendTerminationReport(reason);
     PCLogStack([NSString stringWithFormat:@"exit status=%d", status]);
     orig_exit(status);
     __builtin_unreachable();
@@ -720,6 +1238,9 @@ static void pc_exit(int status) {
 
 static void (*orig__exit)(int);
 static void pc__exit(int status) {
+    char reason[64] = {};
+    snprintf(reason, sizeof(reason), "_exit status=%d", status);
+    PCAppendTerminationReport(reason);
     PCLogStack([NSString stringWithFormat:@"_exit status=%d", status]);
     orig__exit(status);
     __builtin_unreachable();
@@ -727,6 +1248,7 @@ static void pc__exit(int status) {
 
 static void (*orig_abort)(void);
 static void pc_abort(void) {
+    PCAppendTerminationReport("abort");
     PCLogStack(@"abort");
     orig_abort();
     __builtin_unreachable();
@@ -734,12 +1256,29 @@ static void pc_abort(void) {
 
 static int (*orig_raise)(int);
 static int pc_raise(int signalNumber) {
+    if (signalNumber == SIGABRT || signalNumber == SIGBUS ||
+        signalNumber == SIGFPE || signalNumber == SIGILL ||
+        signalNumber == SIGSEGV || signalNumber == SIGTRAP) {
+        char reason[64] = {};
+        snprintf(reason, sizeof(reason), "raise signal=%d", signalNumber);
+        PCAppendTerminationReport(reason);
+    }
     PCLogStack([NSString stringWithFormat:@"raise signal=%d", signalNumber]);
     return orig_raise(signalNumber);
 }
 
 static int (*orig_kill)(pid_t, int);
 static int pc_kill(pid_t pid, int signalNumber) {
+    if (pid == getpid() &&
+        (signalNumber == SIGABRT || signalNumber == SIGBUS ||
+         signalNumber == SIGFPE || signalNumber == SIGILL ||
+         signalNumber == SIGSEGV || signalNumber == SIGTRAP ||
+         signalNumber == SIGKILL)) {
+        char reason[80] = {};
+        snprintf(reason, sizeof(reason), "kill pid=%d signal=%d", pid,
+                 signalNumber);
+        PCAppendTerminationReport(reason);
+    }
     PCLogStack([NSString stringWithFormat:@"kill pid=%d signal=%d", pid, signalNumber]);
     return orig_kill(pid, signalNumber);
 }
@@ -879,6 +1418,495 @@ static float pc_timeRewardGetRemainTime(void *instance, int32_t type, const void
         return forced;
     }
     return original;
+}
+
+// MainScene.OpenAwakeUI runs these four display-only coroutines in order after
+// purchase recovery and main-scene initialization. Completing only these
+// iterators suppresses the automatic startup popups while leaving the rest of
+// C_StartSequence intact. Their normal/manual feature entry points are not
+// hooked, and the rewarded-ad card logic above remains active.
+static bool PCFinishStartupPopup(void *iterator, const char *name) {
+    if (iterator) {
+        int32_t *state = (int32_t *)((uint8_t *)iterator + 0x10);
+        if (*state == 0) {
+            NSLog(@"#pc  MainScene.StartupPopup skipped=%s iterator=%p", name, iterator);
+        }
+        *state = -1;
+    }
+    return false;
+}
+
+static bool (*orig_openNoticeMoveNext)(void *, const void *);
+static bool pc_openNoticeMoveNext(void *iterator, const void *method) {
+    return PCFinishStartupPopup(iterator, "OpenNotice");
+}
+
+static bool (*orig_openLoginBonusMoveNext)(void *, const void *);
+static bool pc_openLoginBonusMoveNext(void *iterator, const void *method) {
+    return PCFinishStartupPopup(iterator, "OpenLoginBonus");
+}
+
+static bool (*orig_openAFKMoveNext)(void *, const void *);
+static bool pc_openAFKMoveNext(void *iterator, const void *method) {
+    return PCFinishStartupPopup(iterator, "OpenAFK");
+}
+
+static bool (*orig_openTimeDealMoveNext)(void *, const void *);
+static bool pc_openTimeDealMoveNext(void *iterator, const void *method) {
+    return PCFinishStartupPopup(iterator, "OpenTimeDeal");
+}
+
+// UIPopupReward.ShowCompete is called when the reward animation has finished
+// and the UI has changed to its final "tap to close" state. Reuse OnBack two
+// seconds later because it performs the same close callback as a real tap.
+static void (*orig_popupRewardShowComplete)(void *, const void *);
+static bool (*orig_popupRewardOnBack)(void *, const void *);
+static bool (*gUnityObjectImplicit)(void *, const void *);
+static void *(*gComponentGetGameObject)(void *, const void *);
+static bool (*gGameObjectGetActiveInHierarchy)(void *, const void *);
+static void *gPendingRewardPopup;
+static uint64_t gRewardPopupGeneration;
+
+static bool PCRewardPopupCanAutoClose(void *instance) {
+    if (!instance || !gUnityObjectImplicit ||
+        !gUnityObjectImplicit(instance, nullptr)) {
+        return false;
+    }
+
+    // UIPopupReward.Event_Click reads _goSkip at +0x60 before handling BtnGet.
+    // The component can outlive this child briefly during a scene transition.
+    void *skipObject = *(void **)((uint8_t *)instance + 0x60);
+    if (!skipObject || !gUnityObjectImplicit(skipObject, nullptr)) {
+        return false;
+    }
+
+    if (gComponentGetGameObject && gGameObjectGetActiveInHierarchy) {
+        void *gameObject = gComponentGetGameObject(instance, nullptr);
+        if (!gameObject || !gUnityObjectImplicit(gameObject, nullptr) ||
+            !gGameObjectGetActiveInHierarchy(gameObject, nullptr)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool pc_popupRewardOnBack(void *instance, const void *method) {
+    if (instance && instance == gPendingRewardPopup) {
+        gPendingRewardPopup = nullptr;
+        gRewardPopupGeneration++;
+    }
+    return orig_popupRewardOnBack(instance, method);
+}
+
+static void pc_popupRewardShowComplete(void *instance, const void *method) {
+    orig_popupRewardShowComplete(instance, method);
+    if (!instance || !orig_popupRewardOnBack) return;
+
+    gPendingRewardPopup = instance;
+    uint64_t generation = ++gRewardPopupGeneration;
+    NSLog(@"#pc  UIPopupReward.AutoClose scheduled instance=%p delay=2.0s", instance);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gPendingRewardPopup != instance ||
+            gRewardPopupGeneration != generation) {
+            return;
+        }
+        bool canClose = false;
+        try {
+            canClose = PCRewardPopupCanAutoClose(instance);
+        } catch (...) {
+            // IL2CPP managed exceptions use C++ Il2CppExceptionWrapper values.
+            // Do not let one escape a libdispatch block and terminate the app.
+            NSLog(@"#pc  UIPopupReward.AutoClose validation exception contained "
+                   "instance=%p",
+                  instance);
+        }
+        if (!canClose) {
+            gPendingRewardPopup = nullptr;
+            gRewardPopupGeneration++;
+            NSLog(@"#pc  UIPopupReward.AutoClose cancelled instance=%p invalid=1",
+                  instance);
+            return;
+        }
+
+        gPendingRewardPopup = nullptr;
+        gRewardPopupGeneration++;
+        NSLog(@"#pc  UIPopupReward.AutoClose firing instance=%p", instance);
+        try {
+            orig_popupRewardOnBack(instance, nullptr);
+            NSLog(@"#pc  UIPopupReward.AutoClose completed instance=%p", instance);
+        } catch (...) {
+            NSLog(@"#pc  UIPopupReward.AutoClose managed exception contained "
+                   "instance=%p",
+                  instance);
+        }
+    });
+}
+
+// C_Result is the hologram equipment-result pipeline. It opens UIItemSelect
+// only when DataUtil.CompareStatEquipedItem reports that the new item is better.
+// Mark that synchronous call path so UIItemSelect instances opened elsewhere
+// keep their normal manual behaviour. Auto-equip reuses PS_ItemEquip.Request;
+// its response already resumes SpawnItem when item-spawner auto mode is active.
+static __thread int gItemSpawnerResultDepth;
+static bool (*orig_itemSpawnerResultMoveNext)(void *, const void *);
+static void (*orig_itemSelectSetData)(void *, void *, int32_t, void *, const void *);
+static int32_t (*gItemInfoGetType)(void *, const void *);
+static void *(*gItemInfoGetStringUID)(void *, const void *);
+static void (*gItemEquipRequest)(int32_t, void *, bool, const void *);
+static void (*gItemSelectClose)(void *, const void *);
+
+static bool pc_itemSpawnerResultMoveNext(void *iterator, const void *method) {
+    gItemSpawnerResultDepth++;
+    bool result = orig_itemSpawnerResultMoveNext(iterator, method);
+    gItemSpawnerResultDepth--;
+    return result;
+}
+
+static void pc_itemSelectSetData(void *instance, void *info, int32_t openType,
+                                 void *userName, const void *method) {
+    bool fromItemSpawner = gItemSpawnerResultDepth > 0 && openType == 0;
+    orig_itemSelectSetData(instance, info, openType, userName, method);
+    if (!fromItemSpawner || !instance || !info || !gItemInfoGetType ||
+        !gItemInfoGetStringUID || !gItemEquipRequest || !gItemSelectClose) {
+        return;
+    }
+
+    int32_t itemType = gItemInfoGetType(info, nullptr);
+    void *uid = gItemInfoGetStringUID(info, nullptr);
+    if (!uid) {
+        NSLog(@"#pc  ItemSpawner.AutoEquip skipped info=%p reason=no_uid", info);
+        return;
+    }
+
+    NSLog(@"#pc  ItemSpawner.AutoEquip request info=%p type=%d uid=%@",
+          info, itemType, PCStringFromIl2Cpp(uid));
+    gItemEquipRequest(itemType, uid, true, nullptr);
+    gItemSelectClose(instance, nullptr);
+}
+
+// The Firewall dungeon's StartDungeon coroutine normally preloads every
+// ranking page and ranked-player details before calling PlayDungeon. Preserve
+// Event_Click's content/ticket validation, but shorten the coroutine after
+// those checks to the ordinary dungeon transition.
+static void *gGameInfoInstance;
+static void (*orig_gameInfoUpdateBattleStart)(void *, const void *);
+static void (*gGameInfoPlayDungeon)(void *, int32_t, int32_t, int32_t,
+                                    const void *);
+static bool (*orig_firewallStartDungeonMoveNext)(void *, const void *);
+
+static void pc_gameInfoUpdateBattleStart(void *instance, const void *method) {
+    if (instance && instance != gGameInfoInstance) {
+        gGameInfoInstance = instance;
+        NSLog(@"#pc  GameInfo captured instance=%p", instance);
+    }
+    orig_gameInfoUpdateBattleStart(instance, method);
+}
+
+static bool pc_firewallStartDungeonMoveNext(void *iterator,
+                                            const void *method) {
+    if (!iterator || *(int32_t *)((uint8_t *)iterator + 0x10) != 0) {
+        return orig_firewallStartDungeonMoveNext(iterator, method);
+    }
+
+    void *ready = *(void **)((uint8_t *)iterator + 0x20);
+    void *data = ready ? *(void **)((uint8_t *)ready + 0x98) : nullptr;
+    void *stage = data ? *(void **)((uint8_t *)data + 0x58) : nullptr;
+    if (!ready || !stage || !gGameInfoInstance || !gGameInfoPlayDungeon) {
+        NSLog(@"#pc  FirewallDungeon.DirectStart fallback iterator=%p ready=%p "
+              "stage=%p gameInfo=%p",
+              iterator, ready, stage, gGameInfoInstance);
+        return orig_firewallStartDungeonMoveNext(iterator, method);
+    }
+
+    int32_t stageIndex = *(int32_t *)((uint8_t *)stage + 0x2C);
+    int32_t level = *(int32_t *)((uint8_t *)ready + 0xA0);
+    *(int32_t *)((uint8_t *)iterator + 0x10) = -1;
+    NSLog(@"#pc  FirewallDungeon.DirectStart stage=%d sector=1 level=%d",
+          stageIndex, level);
+    gGameInfoPlayDungeon(gGameInfoInstance, stageIndex, 1, level, nullptr);
+    return false;
+}
+
+// UIMainScene.CreateRelationEmoji is reached only after the partner-relation
+// cooldown has expired and the main-battle HUD has made the random "care"
+// icon active. Reuse TouchRelationEmoji after creation; it performs the same
+// object/cooldown checks as a physical tap and then sends
+// PS_PartnerRelationExp.Request. The short guard protects against duplicate
+// requests if the same UI instance is refreshed more than once in a frame.
+static void (*orig_mainSceneCreateRelationEmoji)(void *, const void *);
+static bool (*gMainSceneTouchRelationEmoji)(void *, const void *);
+static void *gLastAutoCareEmoji;
+static NSTimeInterval gLastAutoCareRequestTime;
+
+static void pc_mainSceneCreateRelationEmoji(void *instance, const void *method) {
+    orig_mainSceneCreateRelationEmoji(instance, method);
+    if (!instance || !gMainSceneTouchRelationEmoji) return;
+
+    void *emoji = *(void **)((uint8_t *)instance + 0xE8);
+    if (!emoji) return;
+
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    if (emoji == gLastAutoCareEmoji && now - gLastAutoCareRequestTime < 2.0) {
+        return;
+    }
+
+    if (gMainSceneTouchRelationEmoji(instance, nullptr)) {
+        gLastAutoCareEmoji = emoji;
+        gLastAutoCareRequestTime = now;
+        NSLog(@"#pc  PartnerRelation.AutoCare requested scene=%p emoji=%p",
+              instance, emoji);
+    }
+}
+
+// The main-scene task box is tp.UIGuideQuestInfo. SetData stores its current
+// QuestInfo at +0x28 and toggles the completed prompt GameObject at +0x40.
+// Its click handler only calls PS_QuestComplete.Request when the quest is
+// complete, so perform that same request directly and keep the prompt hidden.
+static bool (*gQuestInfoIsComplete)(void *, const void *);
+static bool (*gQuestInfoIsGetReward)(void *, const void *);
+static int32_t (*gQuestInfoGetKey)(void *, const void *);
+static void (*gQuestCompleteRequest)(void *, const void *);
+static void (*gGameObjectSetActive)(void *, bool, const void *);
+static void (*orig_guideQuestSetData)(void *, const void *);
+static int32_t gLastAutoClaimQuestKey = -1;
+static NSTimeInterval gLastAutoClaimRequestTime;
+
+static void pc_guideQuestSetData(void *instance, const void *method) {
+    orig_guideQuestSetData(instance, method);
+    if (!instance) return;
+
+    void *completePrompt = *(void **)((uint8_t *)instance + 0x40);
+    if (completePrompt && gGameObjectSetActive) {
+        gGameObjectSetActive(completePrompt, false, nullptr);
+    }
+
+    void *info = *(void **)((uint8_t *)instance + 0x28);
+    if (!info || !gQuestInfoIsComplete || !gQuestInfoIsGetReward ||
+        !gQuestInfoGetKey || !gQuestCompleteRequest) {
+        return;
+    }
+    if (!gQuestInfoIsComplete(info, nullptr) ||
+        gQuestInfoIsGetReward(info, nullptr)) {
+        return;
+    }
+
+    int32_t key = gQuestInfoGetKey(info, nullptr);
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    if (key == gLastAutoClaimQuestKey && now - gLastAutoClaimRequestTime < 10.0) {
+        return;
+    }
+    gLastAutoClaimQuestKey = key;
+    gLastAutoClaimRequestTime = now;
+    NSLog(@"#pc  GuideQuest.AutoClaim key=%d info=%p", key, info);
+    gQuestCompleteRequest(info, nullptr);
+}
+
+// Mine cells are normally clickable only when SetState finds them immediately
+// adjacent to the current position. Keep the request-in-flight and stamina
+// checks, but allow every rendered cell to reuse RequestMoveCell.
+static void (*gMineRowItemEnableMove)(void *, bool, const void *);
+static bool (*gMineRowItemRequestMoveCell)(void *, const void *);
+static int32_t (*gMineCellInfoGetCol)(void *, const void *);
+static int32_t (*gMineCellInfoGetRow)(void *, const void *);
+static void *(*gMineScrollViewGetCellItem)(void *, int32_t, int32_t,
+                                           const void *);
+static void (*gMineInfosRequest)(const void *);
+static void (*gUIGardenMineSetData)(void *, bool, const void *);
+static int32_t (*gMineInfoGetCol)(void *, const void *);
+static int32_t (*gMineInfoGetRow)(void *, const void *);
+static int32_t (*gMineInfoGetDistance)(void *, const void *);
+
+static bool gMineFarMovePending;
+static void *gMineRefreshPopup;
+static bool gMineRefreshAwaitingResponse;
+static uint64_t gMineRefreshGeneration;
+
+static void (*orig_mineRowItemSetState)(void *, const void *);
+static void pc_mineRowItemSetState(void *instance, const void *method) {
+    orig_mineRowItemSetState(instance, method);
+    if (!instance || !gMineRowItemEnableMove) return;
+    gMineRowItemEnableMove(instance, true, nullptr);
+}
+
+static void (*orig_mineRowItemEventClick)(void *, void *, const void *);
+static void pc_mineRowItemEventClick(void *instance, void *name,
+                                     const void *method) {
+    if (!instance || !gMineRowItemRequestMoveCell) {
+        orig_mineRowItemEventClick(instance, name, method);
+        return;
+    }
+
+    void *info = *(void **)((uint8_t *)instance + 0x30);
+    if (!info || !gMineCellInfoGetCol || !gMineCellInfoGetRow) {
+        orig_mineRowItemEventClick(instance, name, method);
+        return;
+    }
+
+    int32_t col = gMineCellInfoGetCol(info, nullptr);
+    int32_t row = gMineCellInfoGetRow(info, nullptr);
+    int32_t currentCol = col;
+    int32_t currentRow = row;
+    bool hasCurrentCell = false;
+    void *scrollView = *(void **)((uint8_t *)instance + 0x40);
+    if (scrollView && gMineScrollViewGetCellItem) {
+        void *currentItem =
+            gMineScrollViewGetCellItem(scrollView, -1, -1, nullptr);
+        if (currentItem) {
+            void *currentInfo = *(void **)((uint8_t *)currentItem + 0x30);
+            if (currentInfo) {
+                currentCol = gMineCellInfoGetCol(currentInfo, nullptr);
+                currentRow = gMineCellInfoGetRow(currentInfo, nullptr);
+                hasCurrentCell = true;
+            }
+        }
+    }
+
+    int32_t deltaCol = col - currentCol;
+    int32_t deltaRow = row - currentRow;
+    if (deltaCol < 0) deltaCol = -deltaCol;
+    if (deltaRow < 0) deltaRow = -deltaRow;
+    bool farMove = hasCurrentCell && (deltaCol + deltaRow > 1);
+    gMineFarMovePending = false;
+    NSLog(@"#pc  Mine.DirectMove click name=%@ from=(%d,%d) to=(%d,%d) "
+           "distance=%d far=%d moveType=Cell(0)",
+          PCStringFromIl2Cpp(name), currentCol, currentRow, col, row,
+          deltaCol + deltaRow, farMove ? 1 : 0);
+    bool requested = gMineRowItemRequestMoveCell(instance, nullptr);
+    gMineFarMovePending = requested && farMove;
+    NSLog(@"#pc  Mine.DirectMove request col=%d row=%d acceptedLocal=%d "
+           "refreshAfterResponse=%d",
+          col, row, requested ? 1 : 0, gMineFarMovePending ? 1 : 0);
+}
+
+static void (*orig_uiGardenMineMove)(void *, void *, void *, const void *);
+static void pc_uiGardenMineMove(void *instance, void *moveList,
+                                void *cellList, const void *method) {
+    bool refresh = gMineFarMovePending;
+    gMineFarMovePending = false;
+    orig_uiGardenMineMove(instance, moveList, cellList, method);
+    if (!refresh || !instance || !gMineInfosRequest) return;
+
+    gMineRefreshPopup = instance;
+    uint64_t generation = ++gMineRefreshGeneration;
+    NSLog(@"#pc  Mine.ViewRefresh scheduled popup=%p delay=0.75s", instance);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(0.75 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gMineRefreshPopup != instance ||
+            gMineRefreshGeneration != generation) {
+            return;
+        }
+        if (gUnityObjectImplicit && !gUnityObjectImplicit(instance, nullptr)) {
+            gMineRefreshPopup = nullptr;
+            gMineRefreshGeneration++;
+            NSLog(@"#pc  Mine.ViewRefresh cancelled popup=%p destroyed=1",
+                  instance);
+            return;
+        }
+
+        gMineRefreshAwaitingResponse = true;
+        NSLog(@"#pc  Mine.ViewRefresh request PS_MineInfos popup=%p", instance);
+        gMineInfosRequest(nullptr);
+    });
+}
+
+static void (*orig_mineInfosResponse)(void *, const void *);
+static void pc_mineInfosResponse(void *response, const void *method) {
+    bool refresh = gMineRefreshAwaitingResponse;
+    void *mineInfo = response
+        ? *(void **)((uint8_t *)response + 0x48)
+        : nullptr;
+    int32_t col = mineInfo && gMineInfoGetCol
+        ? gMineInfoGetCol(mineInfo, nullptr) : -1;
+    int32_t row = mineInfo && gMineInfoGetRow
+        ? gMineInfoGetRow(mineInfo, nullptr) : -1;
+    int32_t distance = mineInfo && gMineInfoGetDistance
+        ? gMineInfoGetDistance(mineInfo, nullptr) : -1;
+    int32_t rowCount = -1;
+    if (mineInfo) {
+        void *rows = *(void **)((uint8_t *)mineInfo + 0x10);
+        if (rows) {
+            int32_t count = *(int32_t *)((uint8_t *)rows + 0x18);
+            if (count >= 0 && count <= 1024) rowCount = count;
+        }
+    }
+
+    orig_mineInfosResponse(response, method);
+    NSLog(@"#pc  Mine.ViewRefresh response requestedByTweak=%d "
+           "center=(%d,%d) distance=%d rows=%d",
+          refresh ? 1 : 0, col, row, distance, rowCount);
+    if (!refresh) return;
+
+    gMineRefreshAwaitingResponse = false;
+    void *popup = gMineRefreshPopup;
+    gMineRefreshPopup = nullptr;
+    gMineRefreshGeneration++;
+    if (!popup || !gUIGardenMineSetData) return;
+    if (gUnityObjectImplicit && !gUnityObjectImplicit(popup, nullptr)) {
+        NSLog(@"#pc  Mine.ViewRefresh redraw cancelled popup=%p destroyed=1",
+              popup);
+        return;
+    }
+
+    NSLog(@"#pc  Mine.ViewRefresh redraw popup=%p update=0", popup);
+    gUIGardenMineSetData(popup, false, nullptr);
+}
+
+// Only the BattleProcessor.State_Defeat call path is marked. If that first
+// defeat opens UIGrowthGuide, close it through the scene's normal method after
+// one second without affecting growth guides opened elsewhere.
+static __thread int gBattleDefeatDepth;
+static void (*gUIContentsSceneCloseGrowthGuide)(void *, const void *);
+static void *gPendingFailureGrowthScene;
+static uint64_t gFailureGrowthGeneration;
+
+static void (*orig_battleProcessorStateDefeat)(void *, const void *);
+static void pc_battleProcessorStateDefeat(void *instance, const void *method) {
+    gBattleDefeatDepth++;
+    orig_battleProcessorStateDefeat(instance, method);
+    gBattleDefeatDepth--;
+}
+
+static void (*orig_uiContentsSceneShowGrowthGuide)(void *, bool, bool,
+                                                    const void *);
+static void pc_uiContentsSceneShowGrowthGuide(void *instance,
+                                              bool isReservationMoveState,
+                                              bool isAddPopupNode,
+                                              const void *method) {
+    bool isBattleFailure = gBattleDefeatDepth > 0;
+    orig_uiContentsSceneShowGrowthGuide(instance, isReservationMoveState,
+                                        isAddPopupNode, method);
+    if (!isBattleFailure || !instance || !gUIContentsSceneCloseGrowthGuide) {
+        return;
+    }
+
+    gPendingFailureGrowthScene = instance;
+    uint64_t generation = ++gFailureGrowthGeneration;
+    NSLog(@"#pc  BattleFailure.GrowthGuide auto-close scheduled scene=%p delay=1.0s",
+          instance);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gPendingFailureGrowthScene != instance ||
+            gFailureGrowthGeneration != generation) {
+            return;
+        }
+        if (gUnityObjectImplicit && !gUnityObjectImplicit(instance, nullptr)) {
+            gPendingFailureGrowthScene = nullptr;
+            gFailureGrowthGeneration++;
+            NSLog(@"#pc  BattleFailure.GrowthGuide auto-close cancelled scene=%p "
+                   "destroyed=1",
+                  instance);
+            return;
+        }
+
+        gPendingFailureGrowthScene = nullptr;
+        gFailureGrowthGeneration++;
+        NSLog(@"#pc  BattleFailure.GrowthGuide auto-close firing scene=%p", instance);
+        gUIContentsSceneCloseGrowthGuide(instance, nullptr);
+    });
 }
 
 // MARK: - AssetBundle / Addressables memory probes
@@ -1226,11 +2254,79 @@ static void pc_unityInternalLog(int32_t level, int32_t options, void *message,
 static void (*orig_unityInternalLogException)(void *, void *, const void *);
 static void pc_unityInternalLogException(void *exception, void *context,
                                          const void *method) {
+    char exceptionClass[192] = {};
+    char message[1024] = {};
+    char stack[3072] = {};
+    PCDescribeManagedException(exception, exceptionClass, sizeof(exceptionClass),
+                               message, sizeof(message), stack, sizeof(stack));
     @autoreleasepool {
-        NSLog(@"#pc  UNITY level=Exception exception=%p context=%p footprint=%lluMB",
-              exception, context, (unsigned long long)PCMemoryFootprintMB());
+        NSLog(@"#pc  UNITY level=Exception exception=%p context=%p class=%s "
+              "message=%s stack=%s footprint=%lluMB",
+              exception, context, exceptionClass, message, stack,
+              (unsigned long long)PCMemoryFootprintMB());
     }
     orig_unityInternalLogException(exception, context, method);
+}
+
+static void (*orig_exceptionManagerUnhandled)(void *, void *, void *,
+                                              const void *);
+static void pc_exceptionManagerUnhandled(void *instance, void *sender,
+                                         void *eventArguments,
+                                         const void *method) {
+    void *exception = nullptr;
+    bool terminating = false;
+    if (PCReadableRange(eventArguments, 0x19)) {
+        exception = *(void **)((uint8_t *)eventArguments + 0x10);
+        terminating = *(bool *)((uint8_t *)eventArguments + 0x18);
+    }
+    PCAppendManagedExceptionReport("tp.ExceptionManager", exception,
+                                   terminating);
+    orig_exceptionManagerUnhandled(instance, sender, eventArguments, method);
+}
+
+static void (*orig_unityUnhandledException)(void *, void *, const void *);
+static void pc_unityUnhandledException(void *sender, void *eventArguments,
+                                       const void *method) {
+    void *exception = nullptr;
+    bool terminating = false;
+    if (PCReadableRange(eventArguments, 0x19)) {
+        exception = *(void **)((uint8_t *)eventArguments + 0x10);
+        terminating = *(bool *)((uint8_t *)eventArguments + 0x18);
+    }
+    PCAppendManagedExceptionReport("UnityEngine.UnhandledExceptionHandler",
+                                   exception, terminating);
+    orig_unityUnhandledException(sender, eventArguments, method);
+}
+
+static void (*orig_unityIOSNativeUnhandledException)(void *, void *, void *,
+                                                      const void *);
+static void pc_unityIOSNativeUnhandledException(void *managedExceptionType,
+                                                void *managedExceptionMessage,
+                                                void *managedExceptionStack,
+                                                const void *method) {
+    char exceptionType[512] = {};
+    char exceptionMessage[2048] = {};
+    char exceptionStack[4096] = {};
+    PCUTF8FromIl2CppString(managedExceptionType, exceptionType,
+                          sizeof(exceptionType));
+    PCUTF8FromIl2CppString(managedExceptionMessage, exceptionMessage,
+                          sizeof(exceptionMessage));
+    PCUTF8FromIl2CppString(managedExceptionStack, exceptionStack,
+                          sizeof(exceptionStack));
+    char report[7168] = {};
+    snprintf(report, sizeof(report),
+             "UnityCrash.iOSNativeUnhandled type=%s message=%s stack=%s",
+             exceptionType[0] ? exceptionType : "(unknown)",
+             exceptionMessage[0] ? exceptionMessage : "(no message)",
+             exceptionStack[0] ? exceptionStack : "(no managed stack)");
+    PCAppendRawCrashLine(report, true);
+    pthread_mutex_lock(&gPersistentLogLock);
+    if (gPersistentLogFD >= 0) fsync(gPersistentLogFD);
+    if (gUnityCrashHistoryFD >= 0) fsync(gUnityCrashHistoryFD);
+    pthread_mutex_unlock(&gPersistentLogLock);
+    orig_unityIOSNativeUnhandledException(
+        managedExceptionType, managedExceptionMessage, managedExceptionStack,
+        method);
 }
 
 static void PCInstallUnityHooks(intptr_t slide) {
@@ -1242,6 +2338,59 @@ static void PCInstallUnityHooks(intptr_t slide) {
     // auto-open delay selection to a single 0.5s value.
     PCPatchInstruction(slide, 0x2FB5B50, 0x1E20CC20, 0x1E2C1000,
                        "UIItemSpawnerInfo.auto_open_delay_0.5s");
+
+    gQuestInfoIsComplete =
+        (bool (*)(void *, const void *))(slide + 0x2DE9468);
+    gQuestInfoIsGetReward =
+        (bool (*)(void *, const void *))(slide + 0x2DE9560);
+    gQuestInfoGetKey =
+        (int32_t (*)(void *, const void *))(slide + 0x2DEA18C);
+    gQuestCompleteRequest =
+        (void (*)(void *, const void *))(slide + 0x2EEC074);
+    gGameObjectSetActive =
+        (void (*)(void *, bool, const void *))(slide + 0x6A3A5F0);
+    gUnityObjectImplicit =
+        (bool (*)(void *, const void *))(slide + 0x6A42928);
+    gComponentGetGameObject =
+        (void *(*)(void *, const void *))(slide + 0x6A33E0C);
+    gGameObjectGetActiveInHierarchy =
+        (bool (*)(void *, const void *))(slide + 0x6A3A7F4);
+    gItemInfoGetType =
+        (int32_t (*)(void *, const void *))(slide + 0x2DB16E8);
+    gItemInfoGetStringUID =
+        (void *(*)(void *, const void *))(slide + 0x2DB1694);
+    gItemEquipRequest =
+        (void (*)(int32_t, void *, bool, const void *))(slide + 0x2EC6884);
+    gItemSelectClose =
+        (void (*)(void *, const void *))(slide + 0x2FAE02C);
+    gMainSceneTouchRelationEmoji =
+        (bool (*)(void *, const void *))(slide + 0x319E020);
+    gGameInfoPlayDungeon =
+        (void (*)(void *, int32_t, int32_t, int32_t, const void *))
+            (slide + 0x2DA535C);
+    gMineRowItemEnableMove =
+        (void (*)(void *, bool, const void *))(slide + 0x3091548);
+    gMineRowItemRequestMoveCell =
+        (bool (*)(void *, const void *))(slide + 0x3091754);
+    gMineCellInfoGetCol =
+        (int32_t (*)(void *, const void *))(slide + 0x2DBBD6C);
+    gMineCellInfoGetRow =
+        (int32_t (*)(void *, const void *))(slide + 0x2DBBDB4);
+    gMineScrollViewGetCellItem =
+        (void *(*)(void *, int32_t, int32_t, const void *))
+            (slide + 0x308DDAC);
+    gMineInfosRequest =
+        (void (*)(const void *))(slide + 0x2ED9FE0);
+    gUIGardenMineSetData =
+        (void (*)(void *, bool, const void *))(slide + 0x308BABC);
+    gMineInfoGetCol =
+        (int32_t (*)(void *, const void *))(slide + 0x2DBC260);
+    gMineInfoGetRow =
+        (int32_t (*)(void *, const void *))(slide + 0x2DBC2A0);
+    gMineInfoGetDistance =
+        (int32_t (*)(void *, const void *))(slide + 0x2DBC2E0);
+    gUIContentsSceneCloseGrowthGuide =
+        (void (*)(void *, const void *))(slide + 0x3199FCC);
 
     gAddressablesReleaseInstance =
         (bool (*)(void *))(slide + 0x644DDFC);
@@ -1283,6 +2432,64 @@ static void PCInstallUnityHooks(intptr_t slide) {
     PCHook((void *)(slide + 0x2DBA910), (void *)pc_timeRewardGetRemainTime,
            (void **)&orig_timeRewardGetRemainTime,
            "TimeRewardListParam.GetRemainTime_AdRemove_0x2DBA910");
+    PCHook((void *)(slide + 0x2F19F64), (void *)pc_openNoticeMoveNext,
+           (void **)&orig_openNoticeMoveNext,
+           "MainScene.OpenNotice.MoveNext_skip_0x2F19F64");
+    PCHook((void *)(slide + 0x2F19B24), (void *)pc_openLoginBonusMoveNext,
+           (void **)&orig_openLoginBonusMoveNext,
+           "MainScene.OpenLoginBonus.MoveNext_skip_0x2F19B24");
+    PCHook((void *)(slide + 0x2F18C00), (void *)pc_openAFKMoveNext,
+           (void **)&orig_openAFKMoveNext,
+           "MainScene.OpenAFK.MoveNext_skip_0x2F18C00");
+    PCHook((void *)(slide + 0x2F1A8E8), (void *)pc_openTimeDealMoveNext,
+           (void **)&orig_openTimeDealMoveNext,
+           "MainScene.OpenTimeDeal.MoveNext_skip_0x2F1A8E8");
+    PCHook((void *)(slide + 0x320C998), (void *)pc_popupRewardOnBack,
+           (void **)&orig_popupRewardOnBack,
+           "UIPopupReward.OnBack_auto_close_0x320C998");
+    PCHook((void *)(slide + 0x320CDC8), (void *)pc_popupRewardShowComplete,
+           (void **)&orig_popupRewardShowComplete,
+           "UIPopupReward.ShowCompete_auto_close_0x320CDC8");
+    PCHook((void *)(slide + 0x2FB5ECC), (void *)pc_itemSpawnerResultMoveNext,
+           (void **)&orig_itemSpawnerResultMoveNext,
+           "UIItemSpawnerInfo.C_Result.MoveNext_auto_equip_0x2FB5ECC");
+    PCHook((void *)(slide + 0x2FACE08), (void *)pc_itemSelectSetData,
+           (void **)&orig_itemSelectSetData,
+           "UIItemSelect.SetData_item_spawner_auto_equip_0x2FACE08");
+    PCHook((void *)(slide + 0x2DAADFC),
+           (void *)pc_gameInfoUpdateBattleStart,
+           (void **)&orig_gameInfoUpdateBattleStart,
+           "GameInfo.UpdateBattleStart_capture_0x2DAADFC");
+    PCHook((void *)(slide + 0x30391D0),
+           (void *)pc_firewallStartDungeonMoveNext,
+           (void **)&orig_firewallStartDungeonMoveNext,
+           "UIDungeonReady_Firewall.StartDungeon.MoveNext_direct_0x30391D0");
+    PCHook((void *)(slide + 0x319DB10),
+           (void *)pc_mainSceneCreateRelationEmoji,
+           (void **)&orig_mainSceneCreateRelationEmoji,
+           "UIMainScene.CreateRelationEmoji_auto_care_0x319DB10");
+    PCHook((void *)(slide + 0x320ED20), (void *)pc_guideQuestSetData,
+           (void **)&orig_guideQuestSetData,
+           "UIGuideQuestInfo.SetData_auto_claim_0x320ED20");
+    PCHook((void *)(slide + 0x309117C), (void *)pc_mineRowItemSetState,
+           (void **)&orig_mineRowItemSetState,
+           "UIGardenMineRowItem.SetState_enable_all_0x309117C");
+    PCHook((void *)(slide + 0x3091F58), (void *)pc_mineRowItemEventClick,
+           (void **)&orig_mineRowItemEventClick,
+           "UIGardenMineRowItem.Event_Click_direct_move_0x3091F58");
+    PCHook((void *)(slide + 0x308D210), (void *)pc_uiGardenMineMove,
+           (void **)&orig_uiGardenMineMove,
+           "UIGardenMine.Move_refresh_far_target_0x308D210");
+    PCHook((void *)(slide + 0x2EDA160), (void *)pc_mineInfosResponse,
+           (void **)&orig_mineInfosResponse,
+           "PS_MineInfos.Response_refresh_far_target_0x2EDA160");
+    PCHook((void *)(slide + 0x31432F4), (void *)pc_battleProcessorStateDefeat,
+           (void **)&orig_battleProcessorStateDefeat,
+           "BattleProcessor.State_Defeat_mark_0x31432F4");
+    PCHook((void *)(slide + 0x31998F0),
+           (void *)pc_uiContentsSceneShowGrowthGuide,
+           (void **)&orig_uiContentsSceneShowGrowthGuide,
+           "UIContentsScene.ShowGrowthGuide_auto_close_failure_0x31998F0");
 
     PCHook((void *)(slide + 0x57FAAEC), (void *)pc_gameObjectPoolInitPath,
            (void **)&orig_gameObjectPoolInitPath,
@@ -1342,6 +2549,18 @@ static void PCInstallUnityHooks(intptr_t slide) {
     PCHook((void *)(slide + 0x69B7D70), (void *)pc_unityInternalLogException,
            (void **)&orig_unityInternalLogException,
            "DebugLogHandler.Internal_LogException_0x69B7D70");
+    PCHook((void *)(slide + 0x3280374),
+           (void *)pc_exceptionManagerUnhandled,
+           (void **)&orig_exceptionManagerUnhandled,
+           "ExceptionManager.HandleUnhandledException_0x3280374");
+    PCHook((void *)(slide + 0x6A41DE8),
+           (void *)pc_unityUnhandledException,
+           (void **)&orig_unityUnhandledException,
+           "Unity.UnhandledExceptionHandler.Handle_0x6A41DE8");
+    PCHook((void *)(slide + 0x6A42018),
+           (void *)pc_unityIOSNativeUnhandledException,
+           (void **)&orig_unityIOSNativeUnhandledException,
+           "Unity.iOSNativeUnhandledExceptionHandler_0x6A42018");
 }
 
 static void PCImageAdded(const struct mach_header *header, intptr_t slide) {
@@ -1369,6 +2588,7 @@ static void PCInstallSymbolHooks(void) {
     PC_HOOK_SYMBOL("sysctl", pc_sysctl, orig_sysctl);
     PC_HOOK_SYMBOL("sysctlbyname", pc_sysctlbyname, orig_sysctlbyname);
     PC_HOOK_SYMBOL("ptrace", pc_ptrace, orig_ptrace);
+    PC_HOOK_SYMBOL("__cxa_throw", pc_cxa_throw, orig_cxa_throw);
     PC_HOOK_SYMBOL("exit", pc_exit, orig_exit);
     PC_HOOK_SYMBOL("_exit", pc__exit, orig__exit);
     PC_HOOK_SYMBOL("abort", pc_abort, orig_abort);
@@ -1391,6 +2611,7 @@ __attribute__((constructor)) static void PCMacProbeInitialize(void) {
         NSLog(@"#pc  PCMacProbe loaded bundle=%@ pid=%d", bundleID, getpid());
         NSLog(@"#pc  persistent logs pc=%@ unity_native=%@",
               gPersistentLogPath, gUnityNativeLogPath);
+        NSLog(@"#pc  crash history=%@", gUnityCrashHistoryPath);
 
         PCInstallSymbolHooks();
         PCHookMessage(NSFileManager.class, @selector(fileExistsAtPath:),

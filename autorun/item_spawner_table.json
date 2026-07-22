@@ -1,0 +1,212 @@
+{
+  "1": {
+    "level": 1,
+    "spawn_count": 1,
+    "gold": 0,
+    "gold_count": 0,
+    "time": 0
+  },
+  "2": {
+    "level": 2,
+    "spawn_count": 2,
+    "gold": 6000,
+    "gold_count": 2,
+    "time": 60
+  },
+  "3": {
+    "level": 3,
+    "spawn_count": 2,
+    "gold": 13000,
+    "gold_count": 2,
+    "time": 300
+  },
+  "4": {
+    "level": 4,
+    "spawn_count": 3,
+    "gold": 24000,
+    "gold_count": 2,
+    "time": 1800
+  },
+  "5": {
+    "level": 5,
+    "spawn_count": 3,
+    "gold": 30000,
+    "gold_count": 2,
+    "time": 3600
+  },
+  "6": {
+    "level": 6,
+    "spawn_count": 4,
+    "gold": 36000,
+    "gold_count": 3,
+    "time": 7200
+  },
+  "7": {
+    "level": 7,
+    "spawn_count": 4,
+    "gold": 43200,
+    "gold_count": 3,
+    "time": 10800
+  },
+  "8": {
+    "level": 8,
+    "spawn_count": 5,
+    "gold": 51840,
+    "gold_count": 3,
+    "time": 14400
+  },
+  "9": {
+    "level": 9,
+    "spawn_count": 5,
+    "gold": 62208,
+    "gold_count": 3,
+    "time": 21600
+  },
+  "10": {
+    "level": 10,
+    "spawn_count": 6,
+    "gold": 80870,
+    "gold_count": 4,
+    "time": 28800
+  },
+  "11": {
+    "level": 11,
+    "spawn_count": 6,
+    "gold": 105131,
+    "gold_count": 4,
+    "time": 36000
+  },
+  "12": {
+    "level": 12,
+    "spawn_count": 7,
+    "gold": 136670,
+    "gold_count": 4,
+    "time": 43200
+  },
+  "13": {
+    "level": 13,
+    "spawn_count": 7,
+    "gold": 177671,
+    "gold_count": 4,
+    "time": 57600
+  },
+  "14": {
+    "level": 14,
+    "spawn_count": 7,
+    "gold": 230972,
+    "gold_count": 4,
+    "time": 72000
+  },
+  "15": {
+    "level": 15,
+    "spawn_count": 8,
+    "gold": 300264,
+    "gold_count": 4,
+    "time": 86400
+  },
+  "16": {
+    "level": 16,
+    "spawn_count": 8,
+    "gold": 390343,
+    "gold_count": 4,
+    "time": 100800
+  },
+  "17": {
+    "level": 17,
+    "spawn_count": 8,
+    "gold": 546480,
+    "gold_count": 5,
+    "time": 115200
+  },
+  "18": {
+    "level": 18,
+    "spawn_count": 9,
+    "gold": 765072,
+    "gold_count": 5,
+    "time": 129600
+  },
+  "19": {
+    "level": 19,
+    "spawn_count": 9,
+    "gold": 1071101,
+    "gold_count": 5,
+    "time": 144000
+  },
+  "20": {
+    "level": 20,
+    "spawn_count": 9,
+    "gold": 1499541,
+    "gold_count": 5,
+    "time": 172800
+  },
+  "21": {
+    "level": 21,
+    "spawn_count": 9,
+    "gold": 2099357,
+    "gold_count": 5,
+    "time": 201600
+  },
+  "22": {
+    "level": 22,
+    "spawn_count": 10,
+    "gold": 3149036,
+    "gold_count": 6,
+    "time": 230400
+  },
+  "23": {
+    "level": 23,
+    "spawn_count": 10,
+    "gold": 4723554,
+    "gold_count": 6,
+    "time": 259200
+  },
+  "24": {
+    "level": 24,
+    "spawn_count": 10,
+    "gold": 7557686,
+    "gold_count": 6,
+    "time": 288000
+  },
+  "25": {
+    "level": 25,
+    "spawn_count": 10,
+    "gold": 12092298,
+    "gold_count": 6,
+    "time": 316800
+  },
+  "26": {
+    "level": 26,
+    "spawn_count": 10,
+    "gold": 19347677,
+    "gold_count": 6,
+    "time": 345600
+  },
+  "27": {
+    "level": 27,
+    "spawn_count": 10,
+    "gold": 30956283,
+    "gold_count": 6,
+    "time": 374400
+  },
+  "28": {
+    "level": 28,
+    "spawn_count": 10,
+    "gold": 52625681,
+    "gold_count": 6,
+    "time": 403200
+  },
+  "29": {
+    "level": 29,
+    "spawn_count": 20,
+    "gold": 89463658,
+    "gold_count": 6,
+    "time": 432000
+  },
+  "30": {
+    "level": 30,
+    "spawn_count": 20,
+    "gold": 152088219,
+    "gold_count": 6,
+    "time": 460800
+  }
+}

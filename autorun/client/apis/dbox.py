@@ -12,7 +12,20 @@ def info(client: "ApiClient") -> dict:
 
 
 def search(client: "ApiClient") -> dict:
+    """Find random other private boxes (寻找驯兽师). Empty body."""
     return client.post_encrypted("/api/dimensional-box/search", {})
+
+
+def target_info(client: "ApiClient", owner_uid: str) -> dict:
+    """Inspect another player's private box layout (devices + deco)."""
+    return client.post_encrypted(
+        "/api/dimensional-box/target-info",
+        {"_ownerUID": str(owner_uid)},
+    )
+
+
+def box_cooltime_list(client: "ApiClient") -> dict:
+    return client.post_encrypted("/api/dimensional-box/box-cooltime-list", {})
 
 
 def public_info(client: "ApiClient", owner_uid: str) -> dict:
