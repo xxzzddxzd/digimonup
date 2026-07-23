@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from client.account_store import apply_account_to_config, import_input_file, load_account_file
 from client.qmd_auto import run_auto_once
 from client.farm import FarmConfig, FarmRunner
+from client.promotion_care import build_promotion_snapshot, format_promo_line
 from client.item_spawner_care import run_zb
 from client.pvp_care import run_pvp
 from client.heartbeat import HeartbeatService
@@ -74,11 +75,16 @@ def cmd_auto() -> int:
 
 
 
-def cmd_runloop(*, no_boss: bool = False) -> int:
+def cmd_runloop(*, no_boss: bool = False, delay: float = 0.0) -> int:
     """TUI + infinite stay farm on current login frontier.
 
     no_boss: kill only small-mob waves, fail-end without boss; re-open same stage.
+    delay: seconds before each battle/* request (sets REQUEST_DELAY_SEC; default 0).
     """
+    from client.apis import battle as battle_api
+
+    applied = battle_api.set_request_delay(delay)
+    print(f"[*] battle request delay={applied:g}s")
     session = _load_session()
     session.client.log_enabled = False
     session.client.state = STATE
@@ -113,6 +119,19 @@ def cmd_runloop(*, no_boss: bool = False) -> int:
         STATE.set_status("ready")
         STATE.add_event("login pipeline ok")
 
+        promo = build_promotion_snapshot(session.init_data)
+        STATE.set_promotion(rank=int(promo.get("rank") or 0), items=promo.get("items") or [])
+        if promo.get("rank"):
+            lines = [format_promo_line(it) for it in (promo.get("items") or [])]
+            STATE.add_event(
+                f"[*] 升阶 {promo.get('rank')}→{int(promo.get('rank') or 0)+1} "
+                + " | ".join(lines)
+            )
+            print(
+                f"[*] 升阶 {promo.get('rank')}→{int(promo.get('rank') or 0)+1} "
+                + " | ".join(lines)
+            )
+
         hb = HeartbeatService(session, log=STATE.add_event)
         hb.start()
         result["heartbeat"] = {"interval_sec": 60}
@@ -128,6 +147,7 @@ def cmd_runloop(*, no_boss: bool = False) -> int:
             f"{login_stage}-{login_sector} region={login_region} "
             f"repeat={login_repeat} ui_stage={ui_stage_no(login_stage, login_sector, login_repeat)}"
             f"{' noboss' if no_boss else ''}"
+            f" delay={applied:g}s"
         )
 
         cfg = FarmConfig(
@@ -284,6 +304,13 @@ def main() -> int:
         help="runloop: only kill small mobs, skip boss; re-open same stage (no progress)",
     )
     parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.0,
+        metavar="SEC",
+        help="runloop: sleep seconds before each battle request (REQUEST_DELAY_SEC; default 0)",
+    )
+    parser.add_argument(
         "command",
         nargs="?",
         choices=("runloop", "auto", "ts", "mine", "zb", "pvp"),
@@ -330,7 +357,7 @@ def main() -> int:
         return cmd_import(args.input)
 
     if args.command == "runloop":
-        return cmd_runloop(no_boss=bool(args.noboss))
+        return cmd_runloop(no_boss=bool(args.noboss), delay=float(args.delay or 0.0))
     if args.command == "auto":
         return cmd_auto()
     if args.command in ("ts", "mine"):

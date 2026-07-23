@@ -270,6 +270,7 @@ class FarmRunner:
         else:
             kill_waves = waves
 
+        killed_this_run = 0
         for wave_no, mobs in kill_waves:
             self._heartbeat_tick()
             km = self.session.battle_kill_mob(
@@ -279,6 +280,8 @@ class FarmRunner:
             )
             kcode = km.get("_code", 0)
             if kcode not in (0, None):
+                if killed_this_run:
+                    self.state.add_mobs_killed(killed_this_run)
                 self.log(f"[-] kill-mob wave={wave_no} code={kcode} msg={km.get('_message')}")
                 return BattleDropResult(
                     ok=False,
@@ -289,6 +292,14 @@ class FarmRunner:
                     message=km.get("_details") or km.get("_message"),
                     raw_end=km,
                 )
+            killed_this_run += len(mobs)
+
+        if killed_this_run:
+            self.state.add_mobs_killed(killed_this_run)
+            self.log(
+                f"[*] mobs this run={killed_this_run} "
+                f"total={self.state.snapshot().get('mobs_killed', killed_this_run)}"
+            )
 
         self._heartbeat_tick()
         if no_boss:
@@ -312,14 +323,18 @@ class FarmRunner:
         )
         if result.ok:
             labels = ", ".join(f"{d.label}x{d.count}" for d in result.drops) or "(no drops)"
+            mk = self.state.snapshot()
+            mobs_note = (
+                f" mobs+={mk.get('mobs_killed_last', 0)} total={mk.get('mobs_killed', 0)}"
+            )
             if no_boss:
                 self.log(
                     f"[+] noboss ok (no stage advance) drops={labels} "
-                    f"reopen={target.stage}-{target.sector}"
+                    f"reopen={target.stage}-{target.sector}{mobs_note}"
                 )
                 self.state.set_status("noboss-ok")
             else:
-                self.log(f"[+] clear ok drops={labels}")
+                self.log(f"[+] clear ok drops={labels}{mobs_note}")
                 self.state.set_status("clear-ok")
             self.state.set_last_drops(labels)
             self.state.set_last_error("")

@@ -65,6 +65,13 @@ class RuntimeState:
     wins: int = 0
     fails: int = 0
     runs: int = 0
+    # small-mob kills (noboss / kill-mob cumulative)
+    mobs_killed: int = 0
+    mobs_killed_last: int = 0
+
+    # promotion (升阶) quests: server base at login + local kill adds
+    promotion_rank: int = 0
+    promotion_items: list = field(default_factory=list)
 
     # last results
     last_drops: str = "-"
@@ -99,6 +106,11 @@ class RuntimeState:
                 "wins": self.wins,
                 "fails": self.fails,
                 "runs": self.runs,
+                "mobs_killed": self.mobs_killed,
+                "mobs_killed_last": self.mobs_killed_last,
+                "promotion_rank": self.promotion_rank,
+                "promotion_items": [dict(x) for x in self.promotion_items],
+                "promotion_lines": self._promotion_lines_unlocked(),
                 "last_drops": self.last_drops,
                 "last_error": self.last_error,
                 "last_http": self.last_http,
@@ -151,6 +163,43 @@ class RuntimeState:
                 self.drop_totals = dict(drop_totals)
             if stage_wins is not None:
                 self.stage_wins = dict(stage_wins)
+
+    def set_promotion(self, *, rank: int, items: list | None = None) -> None:
+        """Snapshot promotion rank + quests from init-data (server base)."""
+        with self._lock:
+            self.promotion_rank = int(rank or 0)
+            self.promotion_items = [dict(x) for x in (items or [])]
+
+    def _promotion_lines_unlocked(self) -> list[str]:
+        lines: list[str] = []
+        for it in self.promotion_items:
+            dest = int(it.get("dest") or 0)
+            base = int(it.get("base") or 0)
+            local = int(it.get("local") or 0)
+            cur = base + local
+            if dest > 0:
+                cur = min(cur, dest)
+            remain = max(0, dest - cur) if dest else 0
+            label = it.get("label") or f"Q{it.get('key')}"
+            done = bool(it.get("rewarded")) or (dest > 0 and cur >= dest)
+            mark = "✓" if done else f"剩{remain}"
+            lines.append(f"{label} {cur}/{dest} {mark}")
+        return lines
+
+    def add_mobs_killed(self, n: int) -> None:
+        """Accumulate successfully killed small-mob count (e.g. noboss).
+
+        Also advances promotion kill-quest local progress (no re-fetch).
+        """
+        n = int(n or 0)
+        if n <= 0:
+            return
+        with self._lock:
+            self.mobs_killed_last = n
+            self.mobs_killed += n
+            for it in self.promotion_items:
+                if it.get("track_kills"):
+                    it["local"] = int(it.get("local") or 0) + n
 
     def set_last_drops(self, text: str) -> None:
         with self._lock:

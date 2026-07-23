@@ -47,8 +47,9 @@ def build_dashboard(state: RuntimeState) -> Layout:
         Layout(name="right", ratio=1),
     )
     layout["left"].split_column(
-        Layout(name="session", size=9),
-        Layout(name="target", size=9),
+        Layout(name="session", size=10),
+        Layout(name="promo", size=6),
+        Layout(name="target", size=8),
         Layout(name="drops", ratio=1),
     )
     layout["right"].split_column(
@@ -60,8 +61,15 @@ def build_dashboard(state: RuntimeState) -> Layout:
     stage_label = f"{ui_stage}关" if ui_stage else "-"
 
     title = Text("DIGIMON UP  ·  Protocol Client", style="bold white")
+    mobs_hdr = f"  击退={int(snap.get('mobs_killed') or 0)}"
+    promo_hdr = ""
+    for line in (snap.get("promotion_lines") or []):
+        if str(line).startswith("击退"):
+            # e.g. 击退 1831/5000 剩3169
+            promo_hdr = "  " + str(line)
+            break
     sub = Text(
-        f"关卡 {stage_label}   mode={snap['mode']}  status={snap['status']}  recover={snap['recover']}",
+        f"关卡 {stage_label}   mode={snap['mode']}  status={snap['status']}  recover={snap['recover']}{mobs_hdr}{promo_hdr}",
         style="bold yellow" if ui_stage else "dim",
     )
     layout["header"].update(
@@ -71,14 +79,36 @@ def build_dashboard(state: RuntimeState) -> Layout:
     sk = snap["session_key"] or "-"
     if len(sk) > 18:
         sk = sk[:8] + "…" + sk[-6:]
+    mobs_total = int(snap.get("mobs_killed") or 0)
+    mobs_last = int(snap.get("mobs_killed_last") or 0)
     session_rows = [
         ("UID", snap["public_uid"] or "-"),
         ("Server", snap["server_num"] if snap["server_num"] != "" else "-"),
         ("Session", sk),
         ("Runs", f"{snap['runs']}  win={snap['wins']}  fail={snap['fails']}"),
         ("Loop", f"{snap['loop_i']}/{snap['loop_total']}"),
+        ("击退", f"共 {mobs_total}  本轮 {mobs_last}"),
     ]
     layout["session"].update(Panel(_kv_table(session_rows), title="Session", border_style="cyan"))
+
+    promo_rank = int(snap.get("promotion_rank") or 0)
+    promo_lines = snap.get("promotion_lines") or []
+    promo_rows: list[tuple[str, str]] = []
+    if promo_rank:
+        promo_rows.append(("升阶", f"{promo_rank} → {promo_rank + 1}"))
+    if promo_lines:
+        for line in promo_lines:
+            # "击退 1831/5000 剩3169" -> split first token as key
+            parts = str(line).split(" ", 1)
+            if len(parts) == 2:
+                promo_rows.append((parts[0], parts[1]))
+            else:
+                promo_rows.append(("任务", line))
+    else:
+        promo_rows.append(("任务", "-"))
+    layout["promo"].update(
+        Panel(_kv_table(promo_rows), title="升阶任务", border_style="bright_yellow")
+    )
 
     # 游戏内关卡号 = maxStage*maxSector*repeat + maxSector*(stage-1) + sector
     # 主线 60 stage × 10 sector；例 stage=31 sector=4 repeat=1 → 904关

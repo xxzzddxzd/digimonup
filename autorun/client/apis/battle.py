@@ -8,8 +8,22 @@ if TYPE_CHECKING:
     from ..http_client import ApiClient
 
 
-# Delay before each battle-related request.
-REQUEST_DELAY_SEC = 3.0
+# Delay before each battle-related request (seconds).
+# runloop --delay overrides this; default 0 (no wait).
+REQUEST_DELAY_SEC = 0.0
+
+
+def set_request_delay(sec: float | int | None) -> float:
+    """Set global battle request delay; returns applied value."""
+    global REQUEST_DELAY_SEC
+    try:
+        v = float(0.0 if sec is None else sec)
+    except Exception:
+        v = 0.0
+    if v < 0:
+        v = 0.0
+    REQUEST_DELAY_SEC = v
+    return REQUEST_DELAY_SEC
 
 # E_BATTLE_ATTRIBUTE
 ATTR_INIT = 0
