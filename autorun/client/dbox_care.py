@@ -8,13 +8,18 @@ Rules (user 2026-07-21):
   - connected duration >= 30 minutes (else not attackable)
   - attack longest-connected first
 
-Collect / redeploy triggers (disconnect then ensure re-place):
+Collect / redeploy triggers (disconnect then ensure re-place) — 有红点必处理:
   A) rewardIntervalCount > 0
-     => device-disconnect (claim interval rewards + unplace)
-  B) private placement reaches client IsMaxRewardTime red-bang
+     => device-disconnect (claim interval rewards + unplace) + re-place
+  B) IsMaxRewardTime red-bang (any placement; 单次挂满/日上限)
      (elapsed since _startTime >= DimensionalBoxMaxRewardTimeOnce,
       or preResetCollectSeconds+elapsed >= DimensionalBoxMaxRewardTimeDaily)
-     => device-disconnect + ensure re-place even if rewardIntervalCount==0
+     => device-disconnect + re-place（续挂，尽量把每日可挂时间用满）
+  C) placement attacked / damaged (被干)
+     (_isAttacked / accumulateDamage / target-info)
+     => device-disconnect + re-place
+  D) free supporters: always try place while daily place quota remains
+     (server -53011 = 今日可放置时间耗尽; remainTime is a hint)
 
 Deploy / 续上 (no public box; N supporters):
   - Exactly 1 supporter on 自己 box when free quota allows.
@@ -282,6 +287,8 @@ def _placement_map(info_body: dict) -> dict[int, dict]:
             "device_uid": str(duid),
             "reward_interval_count": _int(s.get("_rewardIntervalCount"), 0),
             "remain_time": _int(s.get("_remainTime"), 0),
+            "is_attacked": bool(dev.get("_isAttacked")),
+            "safety_time_at": _int(dev.get("_safetyTimeAt"), 0),
         }
     return out
 
@@ -339,22 +346,126 @@ def is_max_reward_time(
     return False
 
 
+
+
+def _float_num(v: Any, default: float = 0.0) -> float:
+    try:
+        if v is None or v == "":
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _connected_by_device(info_body: dict) -> dict[str, dict]:
+    """device_uid -> {device, user(DBoxUserInfo), accumulate_damage, max_hp}."""
+    out: dict[str, dict] = {}
+    for c in _list_of(info_body.get("_connectedDeviceList")):
+        if not isinstance(c, dict):
+            continue
+        dev = c.get("_device") if isinstance(c.get("_device"), dict) else {}
+        uid = dev.get("_uid")
+        if not uid:
+            continue
+        user = c.get("_user") if isinstance(c.get("_user"), dict) else {}
+        out[str(uid)] = {
+            "device": dev,
+            "user": user,
+            "is_attacked": bool(dev.get("_isAttacked")),
+            "safety_time_at": _int(dev.get("_safetyTimeAt"), 0),
+            "accumulate_damage": _float_num(user.get("_accumulateDamage"), 0.0),
+            "max_hp": _float_num(user.get("_maxHp"), 0.0),
+            "overload": _int(user.get("_overloadValue"), 0),
+        }
+    return out
+
+
+def is_attacked_placement(
+    supporter: dict,
+    *,
+    connected: dict[str, dict] | None = None,
+    info_body: dict | None = None,
+    placement: dict | None = None,
+    session: GameSession | None = None,
+    my_uid: str | None = None,
+    refresh_target_info: bool = False,
+) -> tuple[bool, str | None]:
+    """True when our sitting digimon was PVP-attacked and should be recalled.
+
+    Signals:
+      - device._isAttacked (from info._connectedDeviceList)
+      - defender _accumulateDamage > 0
+      - has dimBoxDeviceUID but missing from connected list (orphaned after kick)
+      - optional target-info refresh: device._isAttacked on owner box
+    """
+    duid = str(supporter.get("_dimBoxDeviceUID") or "")
+    if not duid:
+        return False, None
+    if connected is None:
+        connected = _connected_by_device(info_body or {})
+    row = connected.get(duid) or {}
+    if row.get("is_attacked"):
+        return True, "device_is_attacked"
+    if row:
+        acc = float(row.get("accumulate_damage") or 0.0)
+        max_hp = float(row.get("max_hp") or 0.0)
+        if acc > 0:
+            if max_hp > 0 and acc + 1e-6 >= max_hp:
+                return True, "accumulate_damage_full"
+            return True, "accumulate_damage"
+
+    # Cross-check owner box (private): isAttacked / missing slot / pending.
+    # Also covers orphaned: dimBoxDeviceUID set but not in connected list.
+    if refresh_target_info and session is not None and placement:
+        owner = str(placement.get("owner_uid") or "")
+        is_pub = bool(placement.get("is_public"))
+        if owner and not is_pub and (not my_uid or owner != str(my_uid)):
+            try:
+                ti = dbox_api.target_info(session.client, owner)
+                _raise_if_kick(ti, f"dimensional-box/target-info[atk:{owner[:8]}]")
+                if _code(ti) in (0, None):
+                    found = False
+                    for d in _list_of(ti.get("_deviceList")):
+                        if str(d.get("_uid") or "") != duid and str(
+                            d.get("_targetUserId") or ""
+                        ) != str(my_uid or ""):
+                            continue
+                        found = True
+                        if d.get("_isAttacked"):
+                            return True, "target_info_is_attacked"
+                        pr = d.get("_pendingRewardList") or {}
+                        if _list_of(pr):
+                            return True, "target_info_pending_reward"
+                    if not found and not row:
+                        return True, "orphaned_missing_on_owner_box"
+            except SessionKicked:
+                raise
+            except Exception:
+                pass
+    elif not row:
+        # No connected entry and cannot refresh → still recall to re-place.
+        return True, "orphaned_not_in_connected"
+    return False, None
+
+
 def collect_dbox_rewards(
     session: GameSession,
     *,
     log: LogFn = print,
     reconnect: bool = True,
 ) -> dict:
-    """Disconnect supporters that need claim or private max-reward reset.
+    """Disconnect supporters that need claim, max-reward reset, or attack recall.
 
     - rewardIntervalCount>0: claim interval rewards
     - private placement IsMaxRewardTime: red-bang even when count==0
       (disconnect then ensure re-place)
+    - attacked / damaged placement (被干): same disconnect + re-place
     """
     result: dict[str, Any] = {
         "ok": False,
         "claimable": [],
         "max_reward_private": [],
+        "attacked": [],
         "disconnect_targets": [],
         "claimed_keys": [],
         "disconnect_code": None,
@@ -380,6 +491,8 @@ def collect_dbox_rewards(
 
     claimable = []
     max_reward_private = []
+    attacked = []
+    connected = _connected_by_device(info_body)
     for s in _my_supporters(info_body):
         key = _int(s.get("_key"), 0)
         if not key:
@@ -388,6 +501,16 @@ def collect_dbox_rewards(
         p = placements.get(key)
         device_uid = s.get("_dimBoxDeviceUID")
         elapsed = _supporter_elapsed_sec(s, server_ms)
+        conn = connected.get(str(device_uid or "")) or {}
+        atk, atk_reason = is_attacked_placement(
+            s,
+            connected=connected,
+            info_body=info_body,
+            placement=p,
+            session=session,
+            my_uid=str(my_uid) if my_uid else None,
+            refresh_target_info=True,
+        )
         base = {
             "key": key,
             "count": cnt,
@@ -397,6 +520,10 @@ def collect_dbox_rewards(
             "elapsed_sec": round(elapsed, 1),
             "pre_reset_collect_sec": _int(s.get("_preResetCollectSeconds"), 0),
             "is_max_reward_time": False,
+            "is_attacked": bool(atk),
+            "attack_reason": atk_reason,
+            "accumulate_damage": conn.get("accumulate_damage"),
+            "max_hp": conn.get("max_hp"),
             "reason": None,
         }
         if cnt > 0:
@@ -404,25 +531,35 @@ def collect_dbox_rewards(
             row["reason"] = "reward_interval"
             claimable.append(row)
             continue
-        # Private red-bang: hung to max reward time even if interval count is 0.
-        if device_uid and p and not p.get("is_public") and is_max_reward_time(s, server_ms=server_ms):
+        # Attacked / damaged: 被干 → 召回 (same path as max-reward).
+        if atk:
+            row = dict(base)
+            row["reason"] = f"attacked:{atk_reason}"
+            attacked.append(row)
+            continue
+        # Max-reward red-bang (self/other/public leftover): hung full once/daily.
+        # Must reset + re-place so daily hang time can continue toward daily cap.
+        if device_uid and p and is_max_reward_time(s, server_ms=server_ms):
             row = dict(base)
             row["is_max_reward_time"] = True
-            row["reason"] = "max_reward_time_private"
+            row["reason"] = (
+                "max_reward_time_public" if p.get("is_public") else "max_reward_time_private"
+            )
             max_reward_private.append(row)
 
     result["claimable"] = claimable
     result["max_reward_private"] = max_reward_private
-    # Disconnect union: interval claims + private max-reward reset.
+    result["attacked"] = attacked
+    # Disconnect union: interval + attacked recall + private max-reward reset.
     by_key: dict[int, dict] = {}
-    for row in claimable + max_reward_private:
+    for row in claimable + attacked + max_reward_private:
         by_key[int(row["key"])] = row
     targets = list(by_key.values())
     if not targets:
         result["ok"] = True
         result["skipped_reason"] = "no_claimable"
         log(
-            "[*] dbox collect: no rewardIntervalCount>0 and no private max-reward "
+            "[*] dbox collect: no rewardInterval / attacked / private max-reward "
             "(no disconnect)"
         )
         return result
@@ -431,6 +568,7 @@ def collect_dbox_rewards(
     log(
         f"[*] dbox collect disconnect keys={keys} "
         f"interval={[c['key'] for c in claimable]} "
+        f"attacked={[c['key'] for c in attacked]} "
         f"maxRewardPrivate={[c['key'] for c in max_reward_private]} "
         f"me={nick or my_uid}"
     )
@@ -863,11 +1001,14 @@ def ensure_box_connections(
         remain = _int(s.get("_remainTime"), 0)
         p = placements.get(key)
         if not p:
+            # Free: always attempt re-place to 挂满每日时间.
+            # remainTime is a client hint; server -53011 means true no quota.
+            free.append((key, remain))
             if remain <= 0:
-                result["skipped"].append({"key": key, "reason": "remainTime=0"})
-                log(f"[*] dbox skip key={key} remainTime=0 (no quota)")
-            else:
-                free.append((key, remain))
+                log(
+                    f"[*] dbox free key={key} remainTime=0 "
+                    f"(will try place; -53011 => daily place quota empty)"
+                )
             continue
 
         owner = str(p.get("owner_uid") or "")
@@ -926,8 +1067,20 @@ def ensure_box_connections(
             info_body = dbox_api.info(session.client)
             _raise_if_kick(info_body, "dimensional-box/info(after-self)")
         else:
-            result["failed"].append(entry)
-            log(f"[-] dbox self connect fail key={key} last={entry}")
+            code = entry.get("code")
+            if code == -53011:
+                result["skipped"].append(
+                    {"key": key, "reason": "no_place_quota", "code": code}
+                )
+                log(
+                    f"[*] dbox key={key} no daily place quota (-53011); "
+                    f"wait daily reset to hang more"
+                )
+            else:
+                # Self slot full / other error: still try search place.
+                free.insert(0, (key, remain))
+                result["failed"].append(entry)
+                log(f"[-] dbox self connect fail key={key} last={entry}")
 
     # 2) remaining free (any n) → search + top-n distinct highest-加成 boxes
     result["free_for_search"] = len(free)
@@ -980,10 +1133,24 @@ def ensure_box_connections(
                 result["connected_private"].append(entry)
                 result["connected"].append(entry)
             else:
-                result["failed"].append(entry)
-                log(
-                    f"[-] dbox search connect fail key={key} remain={remain} last={entry}"
-                )
+                code = entry.get("code")
+                if code == -53011:
+                    result["skipped"].append(
+                        {
+                            "key": key,
+                            "reason": "no_place_quota",
+                            "code": code,
+                            "remain": remain,
+                        }
+                    )
+                    log(
+                        f"[*] dbox key={key} no daily place quota (-53011) remain={remain}"
+                    )
+                else:
+                    result["failed"].append(entry)
+                    log(
+                        f"[-] dbox search connect fail key={key} remain={remain} last={entry}"
+                    )
     else:
         result["search_rounds"] = 0
         log("[*] dbox no free supporters for search place")
@@ -1017,22 +1184,52 @@ def run_dbox_care(
     log: LogFn = print,
     max_attacks: int | None = None,
 ) -> dict:
-    """Maintain dbox: claim if needed, keep self+search placements, then attacks.
+    """Maintain dbox: clear red-bangs, hang full daily place time, then attacks.
 
-    Placement policy (N supporters):
-      - withdraw only for rewardIntervalCount claim or private IsMaxRewardTime reset
-      - after free/kick/claim: keep 1 on self; place remaining free on top-N
-        distinct search boxes (highest 加成 each, one empty slot per box)
-      - public box is not used for new deploys
+    Red-bang ops (always):
+      - rewardIntervalCount / IsMaxRewardTime / attacked → disconnect + re-place
+    Hang-full daily:
+      - free supporters always try place (until server -53011 no quota)
+      - after max-once, reset + re-place so daily cap can keep filling
+    Placement:
+      - 1 on self; remaining free on top-N search boxes (no new public)
     """
     collect = collect_dbox_rewards(session, log=log, reconnect=False)
     ensure = ensure_box_connections(session, log=log)
 
+    red_keys = sorted(
+        {
+            int(x.get("key"))
+            for x in (
+                (collect.get("claimable") or [])
+                + (collect.get("attacked") or [])
+                + (collect.get("max_reward_private") or [])
+            )
+            if x.get("key") is not None
+        }
+    )
+    placed_n = (
+        len(ensure.get("already_self") or [])
+        + len(ensure.get("already_other") or [])
+        + len(ensure.get("connected_self") or [])
+        + len(ensure.get("connected_other") or [])
+    )
+    log(
+        f"[*] dbox care red_keys={red_keys} claimed={collect.get('claimed_keys')} "
+        f"placed_now={placed_n} "
+        f"quota_skip={sum(1 for s in (ensure.get('skipped') or []) if s.get('reason')=='no_place_quota')}"
+    )
+
     attacks = run_dbox_attacks(
         session, login_wall=login_wall, log=log, max_attacks=max_attacks
     )
+    care_ok = bool(collect.get("ok") or collect.get("skipped_reason") == "no_claimable") and bool(
+        ensure.get("ok")
+    )
     return {
-        "ok": bool(attacks.get("ok")),
+        "ok": care_ok and bool(attacks.get("ok") or attacks.get("skipped_reason")),
+        "red_keys": red_keys,
+        "placed_now": placed_n,
         "collect": collect,
         "public": ensure,  # compat key name
         "ensure": ensure,
@@ -1047,6 +1244,7 @@ def run_dbox_care(
         "claimed_keys": collect.get("claimed_keys") or [],
         "claimable": collect.get("claimable") or [],
         "max_reward_private": collect.get("max_reward_private") or [],
+        "attacked": collect.get("attacked") or [],
         "rewards": collect.get("rewards") or [],
         "reconnected": (ensure.get("connected") or []) + (ensure.get("moved") or []),
         "reconnect_failed": ensure.get("failed") or [],

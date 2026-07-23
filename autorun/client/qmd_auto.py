@@ -1,4 +1,4 @@
-"""One-shot maintenance: farm + lab + mine + dbox + furnace + qmd + afk.
+"""One-shot maintenance: farm + lab + mine + dbox + furnace + pvp + qmd + afk.
 
 Scheduling is external (crontab hourly). No intimacy-cooldown sleep loop.
 No heartbeat. Session kick (-19006): wait then re-auth and finish once.
@@ -31,6 +31,8 @@ from .dbox_care import run_dbox_care
 from .dbox_care import SessionKicked as DboxSessionKicked
 from .item_spawner_care import run_item_spawner_care
 from .item_spawner_care import SessionKicked as FurnaceSessionKicked
+from .pvp_care import run_pvp_care
+from .pvp_care import SessionKicked as PvpSessionKicked
 
 LogFn = Callable[[str], None]
 
@@ -233,7 +235,7 @@ def run_auto_once(
 ) -> int:
     """Single run (crontab-friendly):
 
-    login -> farm -> lab -> mine -> dbox -> furnace -> qmd(if ready, else skip) -> afk -> exit
+    login -> farm -> lab -> mine -> dbox -> furnace -> pvp -> qmd(if ready, else skip) -> afk -> exit
 
     No long sleep on intimacy cooldown. On -19006: wait 600s, re-login, finish once.
     """
@@ -318,7 +320,11 @@ def run_auto_once(
                         result="dbox",
                         detail=(
                             f"ok={dbox.get('ok')} "
+                            f"red={dbox.get('red_keys')} "
                             f"claimed={dbox.get('claimed_keys')} "
+                            f"attacked={len(dbox.get('attacked') or [])} "
+                            f"maxR={len(dbox.get('max_reward_private') or [])} "
+                            f"placed={dbox.get('placed_now')} "
                             f"rewards={len(dbox.get('rewards') or [])} "
                             f"self={len(dbox.get('already_self') or [])}+"
                             f"{len(dbox.get('connected_self') or [])} "
@@ -364,6 +370,24 @@ def run_auto_once(
                     )
                 except FurnaceSessionKicked as fk:
                     raise SessionKicked(fk.where, body=fk.body) from fk
+
+                # pvp / 竞技场: lowest combat until tickets exhausted
+                try:
+                    pvp = run_pvp_care(session, login_wall=login_wall, log=log)
+                    _append_result_log(
+                        result_path,
+                        result="pvp",
+                        detail=(
+                            f"ok={pvp.get('ok')} "
+                            f"battles={pvp.get('battles')} wins={pvp.get('wins')} "
+                            f"fails={pvp.get('fails')} "
+                            f"ticket={pvp.get('ticket_start')}->{pvp.get('ticket_end')} "
+                            f"skip={pvp.get('skipped_reason')}"
+                        ),
+                        log=log,
+                    )
+                except PvpSessionKicked as pk:
+                    raise SessionKicked(pk.where, body=pk.body) from pk
 
                 # qmd: claim every partner that is ready; never sleep until cooldown
                 st, _ = _care_status(session, login_wall=login_wall, log=log)

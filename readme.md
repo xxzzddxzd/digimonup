@@ -1,6 +1,6 @@
 # DIGIMON UP 插件工程
 
-本工程用于调试和扩展 DIGIMON UP 1.0.2 的 Unity/IL2CPP 客户端，包含 iOS 越狱设备版和 PlayCover/macOS 版插件。当前目标 Bundle ID 为 `jp.co.bandainamcoent.BNEI0442`，代码中的 UnityFramework 偏移对应游戏 1.0.2。
+本工程用于调试和扩展 DIGIMON UP 的 Unity/IL2CPP 客户端，包含 iOS 越狱设备版和 PlayCover/macOS 版插件。当前目标 Bundle ID 为 `jp.co.bandainamcoent.BNEI0442`。iOS 版（`iosver`）UnityFramework 偏移对应游戏 1.0.4；Mac/PlayCover 版仍对应 1.0.2。
 
 ## 目录
 

@@ -23,7 +23,8 @@ python3 main.py --input 你的抓包.chlsj
 | --- | --- |
 | `python3 main.py --input FILE` | 从 Charles `.chlsj` / 抓包 JSON 导入账号 |
 | `python3 main.py runloop` | TUI 无限刷当前可打关卡 |
-| `python3 main.py auto` | 单次维护：肉田 → 训练 → 探查 → 异次元 box → 亲密点触 → AFK |
+| `python3 main.py auto` | 单次维护：肉田 → 训练 → 探查 → 异次元 box → 炉子 → 竞技场 PVP → 亲密点触 → AFK |
+| `python3 main.py pvp` | **竞技场**：常规+赛季，各选战力最低挑战，直到两种票都耗尽 |
 | `python3 main.py ts` | **数码世界 / 探索** Textual 交互 TUI：鼠标点格行走 / 钻头 / 冲锋 / 领里程（`mine` 为别名） |
 | `python3 main.py zb` | **开装备**：spawn-and-sell（默认每批 8）；`--info` 看炉子快照 |
 
@@ -49,9 +50,12 @@ python3 main.py ts
 
 ```bash
 python3 main.py runloop
+python3 main.py runloop --noboss
 ```
 
 登录后 TUI + 无限 stay 刷当前登录进度关卡。`Ctrl+C` 停止。掉落统计写 `drop_stats.json`，摘要写 `last_run.json`。
+
+`--noboss`：只打小怪波次（跳过最后一波 boss），`battle/end` 以失败结算，**不推进关卡**；随后 **重开同一关** 继续循环。注意：服务端在非通关结算下通常不给通关掉落。
 
 ### 定时维护 auto
 
@@ -65,13 +69,29 @@ python3 main.py auto
 2. 肉田维护（浇水等）
 3. 训练 / Lab：有完成项则领取 → 重开同一训练 → 请求大家帮助
 4. 探查数码世界 / Mine：耗尽体力捡特训芯片，可冲锋/钻头，尝试里程奖励
-5. 异次元 box：领取红点 → 续上自己 box + 公开 box → 按规则攻击
-6. 亲密点触：遍历 **所有伙伴**（各自独立冷却）；就绪的先 `change-character` 再 `relation-exp`；全冷却则跳过，不长等
-7. AFK 领取
+5. 异次元 box：有红点必处理（可领/单次挂满/被干→召回重上）→ 有额度就挂满（自己1+搜索他人）→ 攻击
+6. 炉子维护（投 bit / 建造，不开放装备）
+7. 竞技场 PVP：常规(356) + 赛季(357) 两种票都打完；各列表选战力最低 → battle
+8. 亲密点触：遍历 **所有伙伴**（各自独立冷却）；就绪的先 `change-character` 再 `relation-exp`；全冷却则跳过，不长等
+9. AFK 领取
 
 结果追加到 `logs/auto.log`。遇会话踢出 `-19006` 会等待后重登并再跑完一轮。
 
 
+
+### 竞技场 pvp
+
+```bash
+python3 main.py pvp                 # 打完常规票(356) + 赛季票(357)
+```
+
+逻辑（`pvp` / `auto` 相同）：
+
+1. **常规竞技场** goods `356`：`/api/arena/matching` → 战力最低 → `/api/arena/battle`（`_stage=1`）
+2. **赛季竞技场** goods `357`：`/api/arena-season/matching`（`_isRefresh:false`）→ 战力最低 → `/api/arena-season/battle`（`_stage=1`）
+3. 上报固定 **`_isWin=false`（认输）**，常规/赛季一致
+
+两种票都耗尽才结束。
 
 ### 开装备 zb
 

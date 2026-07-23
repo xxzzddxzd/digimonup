@@ -15,6 +15,7 @@ from client.account_store import apply_account_to_config, import_input_file, loa
 from client.qmd_auto import run_auto_once
 from client.farm import FarmConfig, FarmRunner
 from client.item_spawner_care import run_zb
+from client.pvp_care import run_pvp
 from client.heartbeat import HeartbeatService
 from client.runtime_state import STATE, ui_stage_no
 from client.session import GameSession
@@ -73,8 +74,11 @@ def cmd_auto() -> int:
 
 
 
-def cmd_runloop() -> int:
-    """TUI + infinite stay farm on current login frontier."""
+def cmd_runloop(*, no_boss: bool = False) -> int:
+    """TUI + infinite stay farm on current login frontier.
+
+    no_boss: kill only small-mob waves, fail-end without boss; re-open same stage.
+    """
     session = _load_session()
     session.client.log_enabled = False
     session.client.state = STATE
@@ -123,6 +127,7 @@ def cmd_runloop() -> int:
             f"[*] runloop: TUI + infinite stay on login frontier "
             f"{login_stage}-{login_sector} region={login_region} "
             f"repeat={login_repeat} ui_stage={ui_stage_no(login_stage, login_sector, login_repeat)}"
+            f"{' noboss' if no_boss else ''}"
         )
 
         cfg = FarmConfig(
@@ -135,6 +140,7 @@ def cmd_runloop() -> int:
             damage="0",
             prefer_server_progress=True,
             stay=True,
+            no_boss=bool(no_boss),
             recover_wait_sec=60.0,
             stats_path=STATS_PATH,
         )
@@ -234,6 +240,34 @@ def cmd_zb(
 
 
 
+def cmd_pvp() -> int:
+    """One-shot arena PVP (regular+season): lowest combat until both tickets gone."""
+    session = _load_session()
+    session.client.log_enabled = True
+    result: dict = {"ok": False, "mode": "pvp"}
+    try:
+        session.run_login_pipeline()
+        print("[+] login pipeline ok")
+        care = run_pvp(session, log=print)
+        result["pvp"] = care
+        result["ok"] = bool(care.get("ok"))
+        print(
+            f"[*] pvp summary battles={care.get('battles')} wins={care.get('wins')} "
+            f"fails={care.get('fails')} tickets={care.get('ticket_start')}->{care.get('ticket_end')}"
+        )
+        return 0 if result["ok"] else 1
+    except Exception as exc:
+        result["error"] = str(exc)
+        result["trace"] = traceback.format_exc()
+        print("[-] FAILED:", exc)
+        traceback.print_exc()
+        return 1
+    finally:
+        dump_path = Path("last_pvp.json")
+        dump_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[*] wrote {dump_path}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="main.py",
@@ -245,10 +279,15 @@ def main() -> int:
         help="import account from Charles .chlsj / capture JSON, write account.json, then exit",
     )
     parser.add_argument(
+        "--noboss",
+        action="store_true",
+        help="runloop: only kill small mobs, skip boss; re-open same stage (no progress)",
+    )
+    parser.add_argument(
         "command",
         nargs="?",
-        choices=("runloop", "auto", "ts", "mine", "zb"),
-        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备",
+        choices=("runloop", "auto", "ts", "mine", "zb", "pvp"),
+        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场(常+赛季)",
     )
     parser.add_argument(
         "--total",
@@ -291,11 +330,13 @@ def main() -> int:
         return cmd_import(args.input)
 
     if args.command == "runloop":
-        return cmd_runloop()
+        return cmd_runloop(no_boss=bool(args.noboss))
     if args.command == "auto":
         return cmd_auto()
     if args.command in ("ts", "mine"):
         return cmd_ts()
+    if args.command == "pvp":
+        return cmd_pvp()
     if args.command == "zb":
         return cmd_zb(
             batches=args.batches,
@@ -310,9 +351,11 @@ def main() -> int:
     print("\nExamples:")
     print("  python3 main.py --input capture.chlsj")
     print("  python3 main.py runloop")
+    print("  python3 main.py runloop --noboss")
     print("  python3 main.py auto")
     print("  python3 main.py ts")
     print("  python3 main.py zb")
+    print("  python3 main.py pvp")
     print("  python3 main.py zb --info")
     print("  python3 main.py zb --total 1000")
     print("  python3 main.py zb --batches 3")

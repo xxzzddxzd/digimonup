@@ -95,6 +95,9 @@ class FarmConfig:
     # Stay on current startable frontier from login; follow server after clear.
     # Note: startable frontier uses server _stage/_sector/_repeat (NG+ uses _repeat>=1).
     stay: bool = False
+    # Skip boss wave (last spawn wave); end as failed-boss and re-open same stage.
+    # Does not advance stage progress; small-mob clear rewards are not granted by server.
+    no_boss: bool = False
     # On fail code < 0: wait then re-login and resume.
     recover_wait_sec: float = 60.0  # default for non-kick fails
     stats_path: str = "drop_stats.json"
@@ -250,7 +253,24 @@ class FarmRunner:
 
         waves = _extract_spawn_waves(start.get("_spawnMobList") or {})
         self.log(f"[+] start ok waves={[(w, len(m)) for w, m in waves]}")
-        for wave_no, mobs in waves:
+
+        # --noboss: skip last wave (boss). Typical pattern: waves 1..N-1 small, N boss(1).
+        no_boss = bool(self.config.no_boss)
+        if no_boss and len(waves) >= 2:
+            kill_waves = waves[:-1]
+            boss_wave = waves[-1]
+            self.log(
+                f"[*] noboss: kill waves={[w for w, _ in kill_waves]} "
+                f"skip boss wave={boss_wave[0]} mobs={len(boss_wave[1])}"
+            )
+        elif no_boss and len(waves) == 1:
+            # Only one wave (likely boss-only): kill nothing, end fail, re-open.
+            kill_waves = []
+            self.log("[*] noboss: single-wave stage, kill none then fail-end")
+        else:
+            kill_waves = waves
+
+        for wave_no, mobs in kill_waves:
             self._heartbeat_tick()
             km = self.session.battle_kill_mob(
                 wave=wave_no,
@@ -271,10 +291,17 @@ class FarmRunner:
                 )
 
         self._heartbeat_tick()
+        if no_boss:
+            # Server-accepted fail end: progress stays, can re-start same stage immediately.
+            end_reason = battle_api.REASON_ALL_DEAD
+            end_state = battle_api.STATE_FAILED_BOSS
+        else:
+            end_reason = battle_api.REASON_CLEAR
+            end_state = battle_api.STATE_FORWARD
         end = self.session.battle_end(
             region=target.region,
-            reason=battle_api.REASON_CLEAR,
-            state=battle_api.STATE_FORWARD,
+            reason=end_reason,
+            state=end_state,
             damage=self.config.damage,
         )
         result = parse_battle_end(
@@ -285,10 +312,17 @@ class FarmRunner:
         )
         if result.ok:
             labels = ", ".join(f"{d.label}x{d.count}" for d in result.drops) or "(no drops)"
-            self.log(f"[+] clear ok drops={labels}")
+            if no_boss:
+                self.log(
+                    f"[+] noboss ok (no stage advance) drops={labels} "
+                    f"reopen={target.stage}-{target.sector}"
+                )
+                self.state.set_status("noboss-ok")
+            else:
+                self.log(f"[+] clear ok drops={labels}")
+                self.state.set_status("clear-ok")
             self.state.set_last_drops(labels)
             self.state.set_last_error("")
-            self.state.set_status("clear-ok")
             # Always cache server progress so next start uses the valid frontier.
             if result.battle_after:
                 self.session.battle_info = result.battle_after
@@ -402,6 +436,8 @@ class FarmRunner:
         infinite = self.config.count <= 0
         count_desc = "infinite" if infinite else str(self.config.count)
         mode = "stay" if self.config.stay else "push"
+        if self.config.no_boss:
+            mode = f"{mode}+noboss"
         self.log(f"[*] farm begin mode={mode} target={target} count={count_desc}")
         self.state.set_mode(mode, count_desc)
         self.state.set_target(region=target.region, stage=target.stage, sector=target.sector, repeat=target.repeat)
