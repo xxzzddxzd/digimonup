@@ -179,9 +179,12 @@ class RuntimeState:
             cur = base + local
             if dest > 0:
                 cur = min(cur, dest)
-            remain = max(0, dest - cur) if dest else 0
             label = it.get("label") or f"Q{it.get('key')}"
-            done = bool(it.get("rewarded")) or (dest > 0 and cur >= dest)
+            if dest <= 0:
+                lines.append(f"{label} {cur}/?")
+                continue
+            remain = max(0, dest - cur)
+            done = bool(it.get("rewarded")) or cur >= dest
             mark = "✓" if done else f"剩{remain}"
             lines.append(f"{label} {cur}/{dest} {mark}")
         return lines

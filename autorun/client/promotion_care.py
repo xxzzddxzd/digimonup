@@ -1,32 +1,30 @@
 """Player promotion (升阶) quest progress for TUI.
 
-Server init/quest-list only has current `_value`, not dest. Dest for the
-current promotion tier is known from UI (e.g. rank 11→12):
-  4101 open equip 10000
-  4102 kill mobs   5000
-  4103 use meat    4000
+Server init/quest-list only has current `_value`, not dest. Dest + labels
+are rank-specific (from UI). Kill-tracked quests (if any) advance locally
+from farm kill-mob counts without re-fetching.
 
-Kill progress is advanced locally from farm kill-mob counts so TUI remaining
-does not require re-fetching quest/list each battle.
+Quest key pattern observed:
+  rank 11 -> 4101, 4102, 4103
+  rank 12 -> 4111, 4112, 4113
+  base = 4100 + (rank - 11) * 10 ; keys = base+1 .. base+3
 """
 from __future__ import annotations
 
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
-# Promotion rank key -> quest key -> dest (total needed).
-# Extend when advancing ranks if dest changes.
-PROMO_DEST_BY_RANK: dict[int, dict[int, int]] = {
-    11: {
-        4101: 10000,  # 开装备
-        4102: 5000,   # 击退敌人
-        4103: 4000,   # 用肉
-    },
-}
-
-QUEST_META: dict[int, dict[str, Any]] = {
-    4101: {"label": "开装备", "track_kills": False},
-    4102: {"label": "击退", "track_kills": True},
-    4103: {"label": "用肉", "track_kills": False},
+# rank_key -> list of quest defs (only show these; never fall back to other ranks)
+PROMO_QUESTS_BY_RANK: dict[int, list[dict[str, Any]]] = {
+    11: [
+        {"key": 4101, "dest": 10000, "label": "开装备", "track_kills": False},
+        {"key": 4102, "dest": 5000, "label": "击退", "track_kills": True},
+        {"key": 4103, "dest": 4000, "label": "用肉", "track_kills": False},
+    ],
+    # 12→13: two gacha 7000 each (no kill). Keys 4111/4112 from live init.
+    12: [
+        {"key": 4111, "dest": 7000, "label": "抽卡1", "track_kills": False},
+        {"key": 4112, "dest": 7000, "label": "抽卡2", "track_kills": False},
+    ],
 }
 
 
@@ -85,13 +83,35 @@ def extract_quest_map(init_data: dict | None) -> dict[int, dict]:
     return out
 
 
-def dest_table_for_rank(rank_key: int) -> dict[int, int]:
-    if rank_key in PROMO_DEST_BY_RANK:
-        return dict(PROMO_DEST_BY_RANK[rank_key])
-    # Fallback: use the latest known table (same keys) so UI still works.
-    if PROMO_DEST_BY_RANK:
-        return dict(PROMO_DEST_BY_RANK[max(PROMO_DEST_BY_RANK)])
-    return {}
+def quest_keys_for_rank(rank: int) -> list[int]:
+    """Observed pattern: rank 11→4101-3, 12→4111-3, …"""
+    if rank < 1:
+        return []
+    base = 4100 + (int(rank) - 11) * 10
+    return [base + 1, base + 2, base + 3]
+
+
+def defs_for_rank(rank: int, quest_map: dict[int, dict] | None = None) -> list[dict[str, Any]]:
+    """Quest definitions for this rank only (no cross-rank fallback)."""
+    rank = int(rank or 0)
+    if rank in PROMO_QUESTS_BY_RANK:
+        return [dict(x) for x in PROMO_QUESTS_BY_RANK[rank]]
+
+    # Unknown rank: only show pattern keys that exist in quest_map, no invented dest/kill.
+    qmap = quest_map or {}
+    defs: list[dict[str, Any]] = []
+    for i, key in enumerate(quest_keys_for_rank(rank), start=1):
+        if key not in qmap:
+            continue
+        defs.append(
+            {
+                "key": key,
+                "dest": 0,  # unknown
+                "label": f"任务{i}",
+                "track_kills": False,
+            }
+        )
+    return defs
 
 
 def build_promotion_snapshot(
@@ -103,34 +123,28 @@ def build_promotion_snapshot(
     """Build promotion progress snapshot from init-data (server base values)."""
     rank = int(rank_key if rank_key is not None else extract_promotion_key(init_data) or 0)
     qmap = quest_map if quest_map is not None else extract_quest_map(init_data)
-    dests = dest_table_for_rank(rank)
     items: list[dict[str, Any]] = []
-    # Prefer known order 4101/4102/4103; include any dest keys present.
-    keys = list(QUEST_META.keys())
-    for k in dests:
-        if k not in keys:
-            keys.append(k)
-    for key in keys:
-        dest = int(dests.get(key) or 0)
-        if dest <= 0 and key not in qmap:
-            continue
-        meta = QUEST_META.get(key) or {"label": f"Q{key}", "track_kills": key == 4102}
+    for dfn in defs_for_rank(rank, qmap):
+        key = int(dfn["key"])
+        dest = int(dfn.get("dest") or 0)
         q = qmap.get(key) or {}
         try:
             base = int(float(q.get("_value") or 0))
         except Exception:
             base = 0
+        # If quest key missing from server list, still show when we have an explicit def
+        # (progress 0) so user sees targets; skip pattern-discovered missing keys already handled.
+        if key not in qmap and rank not in PROMO_QUESTS_BY_RANK:
+            continue
         rewarded = bool(q.get("_isGetReward"))
-        if dest <= 0:
-            dest = max(base, 1)
         items.append(
             {
-                "key": int(key),
-                "label": str(meta.get("label") or f"Q{key}"),
+                "key": key,
+                "label": str(dfn.get("label") or f"Q{key}"),
                 "base": base,
                 "dest": dest,
                 "local": 0,
-                "track_kills": bool(meta.get("track_kills")),
+                "track_kills": bool(dfn.get("track_kills")),
                 "rewarded": rewarded,
             }
         )
@@ -144,9 +158,11 @@ def format_promo_line(item: dict[str, Any]) -> str:
     cur = base + local
     if dest > 0:
         cur = min(cur, dest)
-    remain = max(0, dest - cur) if dest else 0
-    done = "✓" if item.get("rewarded") or (dest and cur >= dest) else ""
     label = item.get("label") or "?"
+    if dest <= 0:
+        return f"{label} {cur}/?"
+    remain = max(0, dest - cur)
+    done = bool(item.get("rewarded")) or cur >= dest
     if done:
-        return f"{label} {cur}/{dest}{done}"
+        return f"{label} {cur}/{dest}✓"
     return f"{label} {cur}/{dest} 剩{remain}"

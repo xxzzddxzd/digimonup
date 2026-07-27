@@ -33,6 +33,8 @@ from .item_spawner_care import run_item_spawner_care
 from .item_spawner_care import SessionKicked as FurnaceSessionKicked
 from .pvp_care import run_pvp_care
 from .pvp_care import SessionKicked as PvpSessionKicked
+from .dungeon_care import run_dungeon_auto_care
+from .dungeon_care import SessionKicked as DungeonSessionKicked
 
 LogFn = Callable[[str], None]
 
@@ -235,7 +237,7 @@ def run_auto_once(
 ) -> int:
     """Single run (crontab-friendly):
 
-    login -> farm -> lab -> mine -> dbox -> furnace -> pvp -> qmd(if ready, else skip) -> afk -> exit
+    login -> farm -> dungeon(ad then burn tickets; skip 10000/10020 battle) -> lab -> mine -> dbox -> furnace -> pvp -> qmd(if ready, else skip) -> afk -> exit
 
     No long sleep on intimacy cooldown. On -19006: wait 600s, re-login, finish once.
     """
@@ -273,6 +275,25 @@ def run_auto_once(
                     )
                 except FarmSessionKicked as fk:
                     raise SessionKicked(fk.where, body=fk.body) from fk
+
+                # dungeon: claim remaining ads, then burn tickets (skip battle 10000/10020)
+                try:
+                    dad = run_dungeon_auto_care(session, log=log)
+                    ad = dad.get("ad") or {}
+                    _append_result_log(
+                        result_path,
+                        result="dungeon",
+                        detail=(
+                            f"ok={dad.get('ok')} "
+                            f"ad_ok={ad.get('total_ok')} ad_fail={ad.get('total_fail')} "
+                            f"clears={dad.get('total_clears')} clear_fail={dad.get('total_clear_fail')} "
+                            f"skip_battle={len(dad.get('skipped_battle') or [])} "
+                            f"ad_keys={ad.get('claimed_keys')}"
+                        ),
+                        log=log,
+                    )
+                except DungeonSessionKicked as dk:
+                    raise SessionKicked(dk.where, body=dk.body) from dk
 
                 # lab / 训练: complete finished run, restart same key, ask camp help
                 try:

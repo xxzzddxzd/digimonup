@@ -1,0 +1,201 @@
+{
+  "source": "GameData.json / GameData.Dungeon (104/1.zip Payload Raw)",
+  "dataNo": "02537ce11599e28919108cefa8e2693c9cd396bce2c3124b1f180c39cfdbf776",
+  "version": "1",
+  "map": {
+    "1": 10000,
+    "2": 10020,
+    "3": 10010,
+    "4": 10030,
+    "5": 10500,
+    "6": 10040,
+    "7": 10041,
+    "8": 10042,
+    "9": 10600,
+    "10": 20000,
+    "11": 10700,
+    "12": 10701,
+    "13": 10702,
+    "14": 20001,
+    "15": 30000,
+    "16": 30001
+  },
+  "rows": [
+    {
+      "key": 1,
+      "stageKey": 10000,
+      "name": "GT_Dungeon_Lamp",
+      "index": 2,
+      "open": true,
+      "costType": "DungeonTicket_Lamp",
+      "cost": 1,
+      "playCount": 2,
+      "adCount": 2
+    },
+    {
+      "key": 2,
+      "stageKey": 10020,
+      "name": "GT_Dungeon_Lava",
+      "index": 3,
+      "open": true,
+      "costType": "DungeonTicket_Lava",
+      "cost": 1,
+      "playCount": 2,
+      "adCount": 2
+    },
+    {
+      "key": 3,
+      "stageKey": 10010,
+      "name": "GT_Dungeon_Flame",
+      "index": 6,
+      "open": true,
+      "costType": "DungeonTicket_Flame",
+      "cost": 1,
+      "playCount": 2,
+      "adCount": 2
+    },
+    {
+      "key": 4,
+      "stageKey": 10030,
+      "name": "GT_Dungeon_Time",
+      "index": 4,
+      "open": true,
+      "costType": "DungeonTicket_TimeTower",
+      "cost": 1,
+      "playCount": 2,
+      "adCount": 2
+    },
+    {
+      "key": 5,
+      "stageKey": 10500,
+      "name": "GT_Dungeon_Defense",
+      "index": 5,
+      "open": true,
+      "costType": "DungeonTicket_Defense",
+      "cost": 1,
+      "playCount": 2,
+      "adCount": 2
+    },
+    {
+      "key": 6,
+      "stageKey": 10040,
+      "name": "GT_DungeonTrial_Job1",
+      "index": 7,
+      "open": false,
+      "costType": "",
+      "cost": 0,
+      "playCount": 0,
+      "adCount": 0
+    },
+    {
+      "key": 7,
+      "stageKey": 10041,
+      "name": "GT_DungeonTrial_Job2",
+      "index": 8,
+      "open": false,
+      "costType": "",
+      "cost": 0,
+      "playCount": 0,
+      "adCount": 0
+    },
+    {
+      "key": 8,
+      "stageKey": 10042,
+      "name": "GT_DungeonTrial_Job3",
+      "index": 9,
+      "open": false,
+      "costType": "",
+      "cost": 0,
+      "playCount": 0,
+      "adCount": 0
+    },
+    {
+      "key": 9,
+      "stageKey": 10600,
+      "name": "GT_Dungeon_Soul",
+      "index": 0,
+      "open": true,
+      "costType": "",
+      "cost": 0,
+      "playCount": 0,
+      "adCount": 0
+    },
+    {
+      "key": 10,
+      "stageKey": 20000,
+      "name": "GT_Arena",
+      "index": 0,
+      "open": true,
+      "costType": "PVPTicket",
+      "cost": 1,
+      "playCount": 2,
+      "adCount": 0
+    },
+    {
+      "key": 11,
+      "stageKey": 10700,
+      "name": "GT_Dungeon_Firewall",
+      "index": 1,
+      "open": true,
+      "costType": "DungeonTicket_Firewall",
+      "cost": 1,
+      "playCount": 2,
+      "adCount": 0
+    },
+    {
+      "key": 12,
+      "stageKey": 10701,
+      "name": "GT_Dungeon_Firewall",
+      "index": 1,
+      "open": true,
+      "costType": "DungeonTicket_Firewall",
+      "cost": 1,
+      "playCount": 2,
+      "adCount": 0
+    },
+    {
+      "key": 13,
+      "stageKey": 10702,
+      "name": "GT_Dungeon_Firewall",
+      "index": 1,
+      "open": true,
+      "costType": "DungeonTicket_Firewall",
+      "cost": 1,
+      "playCount": 2,
+      "adCount": 0
+    },
+    {
+      "key": 14,
+      "stageKey": 20001,
+      "name": "GT_Arena",
+      "index": 0,
+      "open": true,
+      "costType": "PVPTicket_Season",
+      "cost": 1,
+      "playCount": 2,
+      "adCount": 0
+    },
+    {
+      "key": 15,
+      "stageKey": 30000,
+      "name": "GT_Dungeon_Camp1_Title",
+      "index": 0,
+      "open": true,
+      "costType": "DungeonTicket_GuildDungeon1",
+      "cost": 1,
+      "playCount": 0,
+      "adCount": 0
+    },
+    {
+      "key": 16,
+      "stageKey": 30001,
+      "name": "GT_Dungeon_Camp2_Title",
+      "index": 0,
+      "open": true,
+      "costType": "DungeonTicket_GuildDungeon2",
+      "cost": 1,
+      "playCount": 0,
+      "adCount": 0
+    }
+  ]
+}

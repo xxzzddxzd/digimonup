@@ -17,6 +17,7 @@ from client.farm import FarmConfig, FarmRunner
 from client.promotion_care import build_promotion_snapshot, format_promo_line
 from client.item_spawner_care import run_zb
 from client.pvp_care import run_pvp
+from client.dungeon_care import run_fb, resolve_fb_key
 from client.heartbeat import HeartbeatService
 from client.runtime_state import STATE, ui_stage_no
 from client.session import GameSession
@@ -288,6 +289,35 @@ def cmd_pvp() -> int:
         print(f"[*] wrote {dump_path}")
 
 
+
+def cmd_fb(alias: str, *, level: int | None = None) -> int:
+    """Clear one dungeon: fb 1 / fb 2 (or raw key). Level from /api/dungeon/list by default."""
+    session = _load_session()
+    session.client.log_enabled = True
+    result: dict = {"ok": False, "mode": "fb", "alias": alias, "level": level}
+    try:
+        session.run_login_pipeline()
+        print("[+] login pipeline ok")
+        key = resolve_fb_key(alias)
+        result["key"] = key
+        care = run_fb(session, alias=alias, level=level, log=print)
+        result["fb"] = care
+        result["ok"] = bool(care.get("ok"))
+        return 0 if result["ok"] else 1
+    except Exception as exc:
+        result["error"] = str(exc)
+        result["trace"] = traceback.format_exc()
+        print("[-] FAILED:", exc)
+        traceback.print_exc()
+        return 1
+    finally:
+        dump_path = Path("last_fb.json")
+        dump_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[*] wrote {dump_path}")
+
+
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="main.py",
@@ -313,8 +343,8 @@ def main() -> int:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("runloop", "auto", "ts", "mine", "zb", "pvp"),
-        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场(常+赛季)",
+        choices=("runloop", "auto", "ts", "mine", "zb", "pvp", "fb", "dungeon"),
+        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场; fb: 副本",
     )
     parser.add_argument(
         "--total",
@@ -351,6 +381,24 @@ def main() -> int:
         default=0,
         help="zb: _filterMatchCount for spawn-and-sell (default 0)",
     )
+    parser.add_argument(
+        "fb_key",
+        nargs="?",
+        default=None,
+        help="fb: dungeon alias/key (1/2 or fb1/fb2)",
+    )
+    parser.add_argument(
+        "--key",
+        type=int,
+        default=None,
+        help="fb: dungeon progress key override",
+    )
+    parser.add_argument(
+        "--level",
+        type=int,
+        default=None,
+        help="fb: dungeon level (_repeat); default from /api/dungeon/list _level",
+    )
     args = parser.parse_args()
 
     if args.input:
@@ -364,6 +412,12 @@ def main() -> int:
         return cmd_ts()
     if args.command == "pvp":
         return cmd_pvp()
+    if args.command in ("fb", "dungeon"):
+        alias = args.fb_key if args.fb_key is not None else (str(args.key) if args.key is not None else None)
+        if alias is None:
+            print("[-] fb requires key/alias, e.g. python3 main.py fb 1")
+            return 2
+        return cmd_fb(str(alias), level=args.level)
     if args.command == "zb":
         return cmd_zb(
             batches=args.batches,
@@ -387,6 +441,8 @@ def main() -> int:
     print("  python3 main.py zb --total 1000")
     print("  python3 main.py zb --batches 3")
     print("  python3 main.py zb --count 8 --batches 1")
+    print("  python3 main.py fb 1")
+    print("  python3 main.py fb 2 --level 56")
     return 2
 
 
