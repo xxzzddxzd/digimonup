@@ -291,7 +291,7 @@ def cmd_pvp() -> int:
 
 
 def cmd_fb(alias: str, *, level: int | None = None) -> int:
-    """Clear one dungeon: fb 1 / fb 2 (or raw key). Level from /api/dungeon/list by default."""
+    """Clear one dungeon: fb 1 / fb 2 / fb 3 (or raw key). Prefer sweep on cleared floors."""
     session = _load_session()
     session.client.log_enabled = True
     result: dict = {"ok": False, "mode": "fb", "alias": alias, "level": level}
@@ -443,6 +443,7 @@ def main() -> int:
     print("  python3 main.py zb --count 8 --batches 1")
     print("  python3 main.py fb 1")
     print("  python3 main.py fb 2 --level 56")
+    print("  python3 main.py fb 3")
     return 2
 
 

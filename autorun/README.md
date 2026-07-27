@@ -27,7 +27,7 @@ python3 main.py --input 你的抓包.chlsj
 | `python3 main.py pvp` | **竞技场**：常规+赛季，各选战力最低挑战，直到两种票都耗尽 |
 | `python3 main.py ts` | **数码世界 / 探索** Textual 交互 TUI：鼠标点格行走 / 钻头 / 冲锋 / 领里程（`mine` 为别名） |
 | `python3 main.py zb` | **开装备**：spawn-and-sell（默认每批 8）；`--info` 看炉子快照 |
-| `python3 main.py fb 1` / `fb 2` | 清一次副本（层数默认取 list 的 `_level`） |
+| `python3 main.py fb 1` / `fb 2` / `fb 3` | 清一次副本（有通关层优先 sweep；否则 start/end） |
 
 无参数时打印 help 与示例。需要 `ts` 时请安装依赖：`pip install -r requirements.txt`（含 `textual`）。
 
@@ -68,7 +68,7 @@ python3 main.py auto
 
 1. 登录
 2. 肉田维护（浇水等）
-3. 副本：先按 `_adCount` 领广告票；再把有门票的副本打到票空。**10000/10020（key1/2）只领广告不打**
+3. 副本：先按 `_adCount` 领广告票；再把有门票的副本 **扫荡** 到票空（`/api/dungeon/sweep`，用已通关 `_level`）。**10000/10020（key1/2）只领广告不扫**
 4. 训练 / Lab：有完成项则领取 → 重开同一训练 → 请求大家帮助
 5. 探查数码世界 / Mine：耗尽体力捡特训芯片，可冲锋/钻头，尝试里程奖励
 6. 异次元 box：有红点必处理（可领/单次挂满/被干→召回重上）→ 有额度就挂满（自己1+搜索他人）→ 攻击
@@ -89,9 +89,10 @@ python3 main.py pvp                 # 打完常规票(356) + 赛季票(357)
 
 逻辑（`pvp` / `auto` 相同）：
 
-1. **常规竞技场** goods `356`：`/api/arena/matching` → 战力最低 → `/api/arena/battle`（`_stage=1`）
-2. **赛季竞技场** goods `357`：`/api/arena-season/matching`（`_isRefresh:false`）→ 战力最低 → `/api/arena-season/battle`（`_stage=1`）
-3. 上报固定 **`_isWin=false`（认输）**，常规/赛季一致
+1. **常规竞技场** goods `356`：`/api/arena/matching` → 战力最低 → `/api/arena/battle`
+2. **赛季竞技场** goods `357`：`/api/arena-season/matching`（`_isRefresh:false`）→ 战力最低 → `/api/arena-season/battle`
+3. `_stage` 从 `dungeon_key_stage.json` 按 costType 解析（`PVPTicket` / `PVPTicket_Season` → stageKey），不写死
+4. 上报固定 **`_isWin=false`（认输）**，常规/赛季一致
 
 两种票都耗尽才结束。
 

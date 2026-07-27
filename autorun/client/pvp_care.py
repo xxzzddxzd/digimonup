@@ -17,6 +17,7 @@ from typing import Any, Callable, Optional
 
 from .apis import arena as arena_api
 from .apis import farm as farm_api
+from .dungeon_care import load_key_meta
 from .partner_care import current_server_ms
 from .session import GameSession
 
@@ -160,11 +161,43 @@ def _build_battle_info(*, server_ms: int, pvp_type: int, is_win: bool = False) -
     return json.dumps(obj, separators=(",", ":"))
 
 
+
+def resolve_pvp_stage_key(*, ticket_type: int, pvp_type: int | None = None) -> int:
+    """Resolve battle `_stage` from GameData.Dungeon table (dungeon_key_stage.json).
+
+    costType mapping:
+      PVPTicket        (goods 356) -> regular arena stageKey
+      PVPTicket_Season (goods 357) -> season / D-1 stageKey
+    Live capture used season stageKey 20001 (not 1).
+    """
+    want_cost = None
+    if int(ticket_type) == int(GOODS_PVP_TICKET_SEASON) or pvp_type == arena_api.PVP_TYPE_SEASON:
+        want_cost = "PVPTicket_Season"
+        fallback = arena_api.ARENA_SEASON_STAGE_KEY_FALLBACK
+    else:
+        want_cost = "PVPTicket"
+        fallback = arena_api.ARENA_STAGE_KEY_FALLBACK
+
+    meta = load_key_meta()
+    for row in meta.values():
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("costType") or "") != want_cost:
+            continue
+        try:
+            stage = int(row.get("stageKey"))
+        except Exception:
+            continue
+        if stage > 0:
+            return stage
+    return int(fallback)
+
+
 def _mode_regular() -> PvpMode:
     return PvpMode(
         name="arena",
         ticket_type=GOODS_PVP_TICKET,
-        stage=arena_api.ARENA_STAGE_KEY,
+        stage=resolve_pvp_stage_key(ticket_type=GOODS_PVP_TICKET, pvp_type=arena_api.PVP_TYPE_ARENA),
         pvp_type=arena_api.PVP_TYPE_ARENA,
         info_key="_arena",
         battle_info_key="_arena",
@@ -175,7 +208,9 @@ def _mode_season() -> PvpMode:
     return PvpMode(
         name="arena_season",
         ticket_type=GOODS_PVP_TICKET_SEASON,
-        stage=arena_api.ARENA_SEASON_STAGE_KEY,
+        stage=resolve_pvp_stage_key(
+            ticket_type=GOODS_PVP_TICKET_SEASON, pvp_type=arena_api.PVP_TYPE_SEASON
+        ),
         pvp_type=arena_api.PVP_TYPE_SEASON,
         info_key="_arenaSeason",
         battle_info_key="_arenaSeason",

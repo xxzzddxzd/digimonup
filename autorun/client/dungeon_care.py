@@ -13,6 +13,7 @@ Keys:
 FB aliases (user mapping from live runs):
   fb 1 -> dungeon key 1 (Lamp, stageKey 10000)
   fb 2 -> dungeon key 2 (Lava, stageKey 10020)
+  fb 3 -> dungeon key 3 (Flame, stageKey 10010)
 
 auto dungeon policy:
   1. claim remaining ad tickets by `_adCount`
@@ -43,11 +44,26 @@ FB_KEY_ALIASES: dict[str, int] = {
     "2": 2,
     "fb2": 2,
     "lava": 2,
+    "3": 3,
+    "fb3": 3,
+    "flame": 3,
 }
 
 # auto: only fill ads for these stages; never battle them.
 AD_ONLY_STAGE_KEYS = {10000, 10020}  # Lamp / Lava
 AD_ONLY_DUNGEON_KEYS = {1, 2}
+
+# costTypes that use /api/dungeon/camp-sweep instead of /api/dungeon/sweep
+CAMP_SWEEP_COST_TYPES = {
+    "DungeonTicket_GuildDungeon1",
+    "DungeonTicket_GuildDungeon2",
+}
+
+# Live: firewall sweep returns -29004 (not sweepable); battle start still -10001.
+# Skip burning these until battle start is fixed.
+NO_SWEEP_COST_TYPES = {
+    "DungeonTicket_Firewall",
+}
 
 # E_GOODS_TYPE dungeon tickets (from client enum)
 COST_TYPE_TO_GOODS: dict[str, int] = {
@@ -199,6 +215,22 @@ def pick_level(progress: dict | None, *, override: int | None = None) -> int:
     return max(1, level + 1)
 
 
+def pick_sweep_level(progress: dict | None, *, override: int | None = None) -> int | None:
+    """Level for /api/dungeon/sweep: must be an already-cleared floor.
+
+    Live: sweep `_level` = progress `_level` (highest cleared). Returns None if
+    nothing has been cleared yet (`_level=0`) — then battle clear is required.
+    """
+    if override is not None:
+        return max(1, int(override))
+    if not progress:
+        return None
+    level = _int(progress.get("_level") or progress.get("level"), 0)
+    if level <= 0:
+        return None
+    return level
+
+
 def summarize_row(row: dict, meta: dict[int, dict] | None = None) -> dict[str, Any]:
     key = _int(row.get("_key") or row.get("key"))
     m = (meta or {}).get(key) or {}
@@ -326,6 +358,142 @@ def claim_ad_ticket(
         )
     else:
         log(f"[-] ad-view fail key={key} code={result['code']} msg={result['message']}")
+    return result
+
+
+def run_dungeon_sweep(
+    session: GameSession,
+    *,
+    key: int,
+    level: int | None = None,
+    sector: int = 1,
+    log: LogFn = print,
+) -> dict[str, Any]:
+    """One ticket clear via /api/dungeon/sweep (no start/end battle).
+
+    Requires an already-cleared floor. Body: {_key, _sector, _level=cleared}.
+    Live 2026-07-27: flame key=3 level=42 -> code=0, goods 101 3->2.
+    """
+    key = int(key)
+    meta = load_key_meta()
+    rows, listed = fetch_dungeon_rows(session)
+    prog = progress_for(rows, key)
+    use_level = pick_sweep_level(prog, override=level)
+
+    result: dict[str, Any] = {
+        "ok": False,
+        "mode": "sweep",
+        "key": key,
+        "sector": int(sector),
+        "level": use_level,
+        "stageKey": (meta.get(key) or {}).get("stageKey"),
+        "progress_before": summarize_row(prog or {"_key": key}, meta),
+        "list_code": _code(listed) if listed else None,
+    }
+    if use_level is None:
+        result["error"] = "no_cleared_level"
+        log(f"[-] dungeon/sweep skip key={key}: no cleared level yet")
+        return result
+
+    log(
+        f"[*] dungeon sweep key={key} sector={sector} level={use_level} "
+        f"name={(meta.get(key) or {}).get('name')}"
+    )
+    body = dungeon_api.dungeon_sweep(
+        session.client, key=key, sector=int(sector), level=int(use_level)
+    )
+    _raise_if_kick(body, "dungeon/sweep")
+    result["code"] = _code(body)
+    result["message"] = body.get("_message") or body.get("_details")
+    result["raw"] = body
+    result["goods"] = _extract_goods_deltas(body)
+    result["rewards"] = _extract_reward_list(body)
+    d = body.get("_dungeon") if isinstance(body.get("_dungeon"), dict) else None
+    if d:
+        result["progress_after"] = summarize_row(d, meta)
+    else:
+        rows2, _ = fetch_dungeon_rows(session)
+        result["progress_after"] = summarize_row(
+            progress_for(rows2, key) or {"_key": key}, meta
+        )
+
+    ok = result["code"] in (0, None)
+    result["ok"] = ok
+    if ok:
+        log(
+            f"[+] dungeon/sweep ok key={key} level={use_level} "
+            f"goods={result['goods']} rewards={len(result.get('rewards') or [])}"
+        )
+    else:
+        log(
+            f"[-] dungeon/sweep fail key={key} code={result['code']} "
+            f"msg={result['message']}"
+        )
+    return result
+
+
+def run_dungeon_camp_sweep(
+    session: GameSession,
+    *,
+    key: int,
+    level: int | None = None,
+    sector: int = 1,
+    log: LogFn = print,
+) -> dict[str, Any]:
+    """Guild dungeon ticket clear via /api/dungeon/camp-sweep.
+
+    Live: key=15/16 level=1 works even when progress `_level=0`.
+    """
+    key = int(key)
+    meta = load_key_meta()
+    rows, listed = fetch_dungeon_rows(session)
+    prog = progress_for(rows, key)
+    # camp-sweep accepts level=1 with no prior clear
+    use_level = int(level) if level is not None else (pick_sweep_level(prog) or 1)
+
+    result: dict[str, Any] = {
+        "ok": False,
+        "mode": "camp_sweep",
+        "key": key,
+        "sector": int(sector),
+        "level": use_level,
+        "stageKey": (meta.get(key) or {}).get("stageKey"),
+        "progress_before": summarize_row(prog or {"_key": key}, meta),
+        "list_code": _code(listed) if listed else None,
+    }
+    log(
+        f"[*] dungeon camp-sweep key={key} sector={sector} level={use_level} "
+        f"name={(meta.get(key) or {}).get('name')}"
+    )
+    body = dungeon_api.dungeon_camp_sweep(
+        session.client, key=key, sector=int(sector), level=int(use_level)
+    )
+    _raise_if_kick(body, "dungeon/camp-sweep")
+    result["code"] = _code(body)
+    result["message"] = body.get("_message") or body.get("_details")
+    result["raw"] = body
+    result["goods"] = _extract_goods_deltas(body)
+    result["rewards"] = _extract_reward_list(body)
+    d = body.get("_dungeon") if isinstance(body.get("_dungeon"), dict) else None
+    if d:
+        result["progress_after"] = summarize_row(d, meta)
+    else:
+        rows2, _ = fetch_dungeon_rows(session)
+        result["progress_after"] = summarize_row(
+            progress_for(rows2, key) or {"_key": key}, meta
+        )
+    ok = result["code"] in (0, None)
+    result["ok"] = ok
+    if ok:
+        log(
+            f"[+] dungeon/camp-sweep ok key={key} level={use_level} "
+            f"goods={result['goods']}"
+        )
+    else:
+        log(
+            f"[-] dungeon/camp-sweep fail key={key} code={result['code']} "
+            f"msg={result['message']}"
+        )
     return result
 
 
@@ -457,7 +625,12 @@ def run_fb(
     log: LogFn = print,
 ) -> dict[str, Any]:
     key = resolve_fb_key(alias)
-    out = run_dungeon_clear(session, key=key, level=level, log=log)
+    rows, _ = fetch_dungeon_rows(session)
+    prog = progress_for(rows, key)
+    if level is None and pick_sweep_level(prog) is not None:
+        out = run_dungeon_sweep(session, key=key, log=log)
+    else:
+        out = run_dungeon_clear(session, key=key, level=level, log=log)
     out["alias"] = str(alias)
     out["fb_key"] = key
     return out
@@ -592,8 +765,9 @@ def run_dungeon_auto_care(
     """auto dungeon flow:
 
     1. claim remaining ads by `_adCount` (all keys, including 10000/10020)
-    2. for dungeons with ticket stock: clear until tickets are gone
-    3. stageKey 10000 / 10020 (keys 1/2): ads only, never battle
+    2. for dungeons with ticket stock: prefer /api/dungeon/sweep on cleared floors
+       until tickets are gone (fallback battle clear if never cleared)
+    3. stageKey 10000 / 10020 (keys 1/2): ads only, never battle/sweep
     """
     result: dict[str, Any] = {
         "ok": True,
@@ -670,6 +844,22 @@ def run_dungeon_auto_care(
             )
             continue
 
+        if cost_type in NO_SWEEP_COST_TYPES:
+            result["skipped_battle"].append(
+                {
+                    "key": key,
+                    "stageKey": stage,
+                    "name": name,
+                    "tickets": stock,
+                    "reason": f"no_sweep:{cost_type}",
+                }
+            )
+            log(
+                f"[*] dungeon skip-burn key={key} stage={stage} name={name} "
+                f"tickets={stock} reason=no_sweep ({cost_type})"
+            )
+            continue
+
         log(
             f"[*] dungeon burn key={key} stage={stage} name={name} "
             f"tickets={stock} cost={cost} costType={cost_type}"
@@ -682,17 +872,48 @@ def run_dungeon_auto_care(
             stock = ticket_stock_for_key(key, goods_map, meta)
             if stock < cost:
                 break
-            one = run_dungeon_clear(session, key=key, log=log)
-            entry = {
-                "key": key,
-                "stageKey": stage,
-                "name": name,
-                "ok": bool(one.get("ok")),
-                "level": one.get("level"),
-                "start_code": one.get("start_code"),
-                "end_code": one.get("end_code"),
-                "tickets_before": stock,
-            }
+            # Route: camp-sweep (guild) / sweep (cleared floor) / battle fallback.
+            rows_now, _ = fetch_dungeon_rows(session)
+            prog_now = progress_for(rows_now, key)
+            if cost_type in CAMP_SWEEP_COST_TYPES:
+                one = run_dungeon_camp_sweep(session, key=key, log=log)
+                entry = {
+                    "key": key,
+                    "stageKey": stage,
+                    "name": name,
+                    "mode": "camp_sweep",
+                    "ok": bool(one.get("ok")),
+                    "level": one.get("level"),
+                    "code": one.get("code"),
+                    "tickets_before": stock,
+                }
+            else:
+                sweep_lv = pick_sweep_level(prog_now)
+                if sweep_lv is not None:
+                    one = run_dungeon_sweep(session, key=key, level=sweep_lv, log=log)
+                    entry = {
+                        "key": key,
+                        "stageKey": stage,
+                        "name": name,
+                        "mode": "sweep",
+                        "ok": bool(one.get("ok")),
+                        "level": one.get("level"),
+                        "code": one.get("code"),
+                        "tickets_before": stock,
+                    }
+                else:
+                    one = run_dungeon_clear(session, key=key, log=log)
+                    entry = {
+                        "key": key,
+                        "stageKey": stage,
+                        "name": name,
+                        "mode": "battle",
+                        "ok": bool(one.get("ok")),
+                        "level": one.get("level"),
+                        "start_code": one.get("start_code"),
+                        "end_code": one.get("end_code"),
+                        "tickets_before": stock,
+                    }
             result["clears"].append(entry)
             if one.get("ok"):
                 clears_done += 1
@@ -702,7 +923,8 @@ def run_dungeon_auto_care(
                 result["total_clear_fail"] += 1
                 result["ok"] = False
                 log(
-                    f"[-] dungeon clear stop key={key} start={one.get('start_code')} "
+                    f"[-] dungeon clear stop key={key} mode={entry.get('mode')} "
+                    f"code={one.get('code') or one.get('start_code')} "
                     f"end={one.get('end_code')}"
                 )
                 break

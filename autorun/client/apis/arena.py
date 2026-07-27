@@ -14,7 +14,8 @@ Tickets (E_GOODS_TYPE):
   356 PVPTicket
   357 PVPTicket_Season
 
-Stage key for both battle APIs: 1
+Stage keys come from GameData.Dungeon via dungeon_key_stage.json
+(costType PVPTicket / PVPTicket_Season -> stageKey). Caller resolves.
 """
 from __future__ import annotations
 
@@ -29,9 +30,14 @@ GOODS_PVP_TICKET_SEASON = 357
 GOODS_PVP_COIN = 400
 GOODS_PVP_COIN_SEASON = 401
 
-# stageKey used by PS_PVPBattle / PS_PVPBattle_Season
-ARENA_STAGE_KEY = 1
-ARENA_SEASON_STAGE_KEY = 1
+# Fallback only if dungeon_key_stage.json missing/incomplete.
+# Prefer resolve via costType in pvp_care / load_key_meta.
+ARENA_STAGE_KEY_FALLBACK = 20000
+ARENA_SEASON_STAGE_KEY_FALLBACK = 20001
+
+# Back-compat aliases (resolved callers should not rely on these)
+ARENA_STAGE_KEY = ARENA_STAGE_KEY_FALLBACK
+ARENA_SEASON_STAGE_KEY = ARENA_SEASON_STAGE_KEY_FALLBACK
 
 # E_PVP_TYPE
 PVP_TYPE_ARENA = 0
@@ -53,12 +59,13 @@ def battle(
     target_uid: str,
     is_win: bool = False,
     battle_info: str = "",
-    stage: int = ARENA_STAGE_KEY,
+    stage: int | None = None,
 ) -> dict:
+    use_stage = ARENA_STAGE_KEY_FALLBACK if stage is None else int(stage)
     return client.post_encrypted(
         "/api/arena/battle",
         {
-            "_stage": int(stage),
+            "_stage": int(use_stage),
             "_isWin": bool(is_win),
             "_targetUID": str(target_uid),
             "_battleInfo": str(battle_info or ""),
@@ -84,12 +91,13 @@ def season_battle(
     target_uid: str,
     is_win: bool = False,
     battle_info: str = "",
-    stage: int = ARENA_SEASON_STAGE_KEY,
+    stage: int | None = None,
 ) -> dict:
+    use_stage = ARENA_SEASON_STAGE_KEY_FALLBACK if stage is None else int(stage)
     return client.post_encrypted(
         "/api/arena-season/battle",
         {
-            "_stage": int(stage),
+            "_stage": int(use_stage),
             "_isWin": bool(is_win),
             "_targetUID": str(target_uid),
             "_battleInfo": str(battle_info or ""),
