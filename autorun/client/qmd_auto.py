@@ -269,7 +269,11 @@ def run_auto_once(
                             f"harvested={len(farm.get('harvested') or [])} "
                             f"planted={len(farm.get('planted') or [])} "
                             f"skipped={len(farm.get('skipped') or [])} "
-                            f"stock203={(farm.get('water_stock') or {}).get('203')}"
+                            f"stock203={(farm.get('water_stock') or {}).get('203')} "
+                            f"seedAds={farm.get('seed_ads_claimed')} "
+                            f"waterAds={farm.get('watering_ads_claimed')} "
+                            f"seedAdLeft={farm.get('seed_ad_remaining_after')} "
+                            f"waterAdLeft={farm.get('watering_ad_remaining_after')}"
                         ),
                         log=log,
                     )

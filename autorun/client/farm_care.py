@@ -6,22 +6,24 @@ Protocol:
   harvest:  POST /api/farm/harvest {"_index"}
   seed:     POST /api/farm/seed {"_index","_type"}
   watering: POST /api/farm/watering {"_index","_type","_count"}
-  goods:    POST /api/goods/list {}  (watering can stock)
+  goods:    POST /api/goods/list {}  (watering can / seed stock)
 
-  # Recorded 2026-07-21 from capture (seed 用尽 → 看广告获取); NOT used by auto yet.
   seed_ad:  POST /api/farm/ad-view {}
-            PS_FarmSeedADView.Request() — empty body
-            resp: {_farm: FarmLevelInfoParam(_adCount,...), _rewardAllList}
-            client API: farm_api.seed_ad_view / farm_api.ad_view
-            UI: UIFarmSeedSelect when seed stock empty
+            PS_FarmSeedADView — empty body
+            remaining: `_farm._adCount` (also `_farmADCount` on daily reset)
+  water_ad: POST /api/farm/watering-ad-view {}
+            PS_FarmFieldWateringADView — empty body
+            remaining: `_farmWatering._adCount` (also `_farmWateringADCount`)
 
 E_FARM_FIELD_STATE: Seed=0 Growing=1 GrowingComplete=2 ...
 Seeds: 200/201/202
 Watering cans: Farm_WateringCan1=203 (live: -1800s each), Farm_WateringCan2=204
 
 Policy (user):
-  If a growing plot has remaining time < 1 hour and watering stock is enough,
-  use ceil(left/30min) waterings, then re-check and harvest. Keep unlocked plots planted.
+  1. If seed-ad / watering-ad remaining > 0, claim them first to replenish stock.
+  2. If a growing plot has remaining time < 1 hour and watering stock is enough,
+     use ceil(left/30min) waterings, then re-check and harvest.
+  3. Keep unlocked plots planted.
 """
 from __future__ import annotations
 
@@ -120,6 +122,129 @@ def _goods_value(goods_payload: dict, goods_type: int) -> int:
         except Exception:
             return 0
     return 0
+
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _reward_goods_delta(body: Any, goods_type: int) -> int:
+    """Sum reward delta for a goods type from `_rewardAllList._rewardList`."""
+    if not isinstance(body, dict):
+        return 0
+    rewards = body.get("_rewardAllList") or {}
+    reward_list = rewards.get("_rewardList") or {}
+    ritems = reward_list.get("_list") or reward_list.get("list") or []
+    total = 0
+    if isinstance(ritems, list):
+        for it in ritems:
+            if not isinstance(it, dict):
+                continue
+            # reward entry: {_type:1,_value:<goodsType>,_count:<delta>}
+            if _as_int(it.get("_value") or it.get("value")) == int(goods_type):
+                total += _as_int(it.get("_count") or it.get("count"))
+    return total
+
+
+def _claim_seed_ads(
+    session: GameSession,
+    *,
+    remaining: int,
+    log: LogFn,
+    result: dict,
+) -> int:
+    """Claim remaining seed ads via /api/farm/ad-view. Returns remaining after claims."""
+    left = max(0, int(remaining))
+    claimed = 0
+    # Hard cap to remaining to avoid infinite loops if server omits decrement.
+    for _ in range(left):
+        if left <= 0:
+            break
+        body = farm_api.seed_ad_view(session.client)
+        _raise_if_kick(body, "farm/ad-view")
+        code = _code(body)
+        entry = {
+            "kind": "seed_ad",
+            "code": code,
+            "message": body.get("_message") if isinstance(body, dict) else None,
+            "before": left,
+        }
+        if code not in (0, None):
+            log(f"[-] farm seed-ad fail code={code} msg={entry['message']}")
+            result["errors"].append(entry)
+            break
+        farm = body.get("_farm") if isinstance(body, dict) else None
+        if isinstance(farm, dict) and farm.get("_adCount") is not None:
+            after = max(0, _as_int(farm.get("_adCount")))
+        else:
+            after = max(0, left - 1)
+        got = 0
+        for typ in SEED_TYPES:
+            got = _reward_goods_delta(body, typ)
+            if got:
+                break
+        entry.update({"after": after, "reward_count": got})
+        result["seed_ads"].append(entry)
+        claimed += 1
+        # Always make progress even if server returns stale remaining.
+        left = min(after, max(0, left - 1))
+        log(f"[+] farm seed-ad ok remaining={left} reward~={got}")
+    result["seed_ads_claimed"] = claimed
+    return left
+
+
+def _claim_watering_ads(
+    session: GameSession,
+    *,
+    remaining: int,
+    log: LogFn,
+    result: dict,
+) -> int:
+    """Claim remaining watering-can ads via /api/farm/watering-ad-view."""
+    left = max(0, int(remaining))
+    claimed = 0
+    for _ in range(left):
+        if left <= 0:
+            break
+        body = farm_api.watering_ad_view(session.client)
+        _raise_if_kick(body, "farm/watering-ad-view")
+        code = _code(body)
+        entry = {
+            "kind": "watering_ad",
+            "code": code,
+            "message": body.get("_message") if isinstance(body, dict) else None,
+            "before": left,
+        }
+        if code not in (0, None):
+            log(f"[-] farm watering-ad fail code={code} msg={entry['message']}")
+            result["errors"].append(entry)
+            break
+        fw = body.get("_farmWatering") if isinstance(body, dict) else None
+        if isinstance(fw, dict) and fw.get("_adCount") is not None:
+            after = max(0, _as_int(fw.get("_adCount")))
+        else:
+            after = max(0, left - 1)
+        got = _reward_goods_delta(body, WATER_TYPE_SMALL)
+        entry.update(
+            {
+                "after": after,
+                "reward_count": got,
+                "viewCount": (fw or {}).get("_viewCount") if isinstance(fw, dict) else None,
+            }
+        )
+        result["watering_ads"].append(entry)
+        claimed += 1
+        left = min(after, max(0, left - 1))
+        log(f"[+] farm watering-ad ok remaining={left} cans+={got}")
+    result["watering_ads_claimed"] = claimed
+    return left
+
 
 
 def _is_harvestable(f: dict, server_ms: int) -> bool:
@@ -290,6 +415,15 @@ def run_farm_maintain(
         "skipped": [],
         "errors": [],
         "water_stock": {},
+        "seed_stock": {},
+        "seed_ads": [],
+        "watering_ads": [],
+        "seed_ads_claimed": 0,
+        "watering_ads_claimed": 0,
+        "seed_ad_remaining_before": 0,
+        "watering_ad_remaining_before": 0,
+        "seed_ad_remaining_after": 0,
+        "watering_ad_remaining_after": 0,
     }
     if login_wall is None:
         login_wall = time.time()
@@ -307,21 +441,57 @@ def run_farm_maintain(
     _raise_if_kick(info, "farm/info")
     farm = info.get("_farm") if isinstance(info, dict) else None
     result["farm"] = farm
+    seed_ad_left = 0
     if isinstance(farm, dict):
+        seed_ad_left = _as_int(farm.get("_adCount"))
         log(
             f"[*] farm info level={farm.get('_level')} exp={farm.get('_exp')} "
-            f"point={farm.get('_point')}"
+            f"point={farm.get('_point')} seedAd={seed_ad_left} "
+            f"adAccel={farm.get('_adAccelCount')}"
         )
     fw = info.get("_farmWatering") if isinstance(info, dict) else None
+    watering_ad_left = 0
     if isinstance(fw, dict):
-        log(f"[*] farm watering viewCount={fw.get('_viewCount')} adCount={fw.get('_adCount')}")
+        watering_ad_left = _as_int(fw.get("_adCount"))
+        log(
+            f"[*] farm watering viewCount={fw.get('_viewCount')} "
+            f"adCount={watering_ad_left}"
+        )
+    result["seed_ad_remaining_before"] = seed_ad_left
+    result["watering_ad_remaining_before"] = watering_ad_left
+
+    # Claim remaining ads before stock-sensitive work.
+    if seed_ad_left > 0:
+        log(f"[*] farm claim seed ads remaining={seed_ad_left}")
+        seed_ad_left = _claim_seed_ads(
+            session, remaining=seed_ad_left, log=log, result=result
+        )
+    else:
+        log("[*] farm seed-ad remaining=0 skip")
+    if watering_ad_left > 0:
+        log(f"[*] farm claim watering ads remaining={watering_ad_left}")
+        watering_ad_left = _claim_watering_ads(
+            session, remaining=watering_ad_left, log=log, result=result
+        )
+    else:
+        log("[*] farm watering-ad remaining=0 skip")
+    result["seed_ad_remaining_after"] = seed_ad_left
+    result["watering_ad_remaining_after"] = watering_ad_left
 
     goods = farm_api.goods_list(session.client)
     _raise_if_kick(goods, "goods/list")
     stock203 = _goods_value(goods, WATER_TYPE_SMALL) if _code(goods) in (0, None) else 0
     stock204 = _goods_value(goods, WATER_TYPE_LARGE) if _code(goods) in (0, None) else 0
+    seed_stock = {
+        str(t): (_goods_value(goods, t) if _code(goods) in (0, None) else 0)
+        for t in SEED_TYPES
+    }
     result["water_stock"] = {str(WATER_TYPE_SMALL): stock203, str(WATER_TYPE_LARGE): stock204}
-    log(f"[*] farm water stock can1(203)={stock203} can2(204)={stock204}")
+    result["seed_stock"] = seed_stock
+    log(
+        f"[*] farm water stock can1(203)={stock203} can2(204)={stock204} "
+        f"seeds={seed_stock}"
+    )
 
     fields = _fields_from_list(listed)
     result["fields_before"] = [
@@ -415,6 +585,7 @@ def run_farm_maintain(
     log(
         f"[*] farm done watered={len(result['watered'])} harvested={len(result['harvested'])} "
         f"planted={len(result['planted'])} skipped={len(result['skipped'])} "
-        f"errors={len(result['errors'])}"
+        f"errors={len(result['errors'])} "
+        f"seedAds={result['seed_ads_claimed']} waterAds={result['watering_ads_claimed']}"
     )
     return result

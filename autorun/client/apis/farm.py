@@ -39,22 +39,37 @@ def watering(client: "ApiClient", *, index: int, water_type: int, count: int) ->
 
 
 def seed_ad_view(client: "ApiClient") -> dict:
-    """Watch ad to obtain farm seeds when seed stock is empty.
+    """Watch ad to obtain farm seeds.
 
-    Live capture 2026-07-21 (seed 用尽 UI → 看广告获取):
-      POST /api/farm/ad-view  encrypted body {}  (no extra fields)
+    Live capture + IL:
+      POST /api/farm/ad-view  encrypted body {}
+      PS_FarmSeedADView.Request() — empty RequestData
+    Response:
+      _farm: FarmLevelInfoParam (_adCount remaining seed-ad quota)
+      _rewardAllList: seed goods granted
 
-    IL: PS_FarmSeedADView.Request()  — empty RequestData
-    Response (PS_FarmSeedADView.ResponseData):
-      _farm: FarmLevelInfoParam  (includes _adCount / ad seed-ad quota)
-      _rewardAllList: AllRewardInfoParam  (seed goods granted)
-
-    UI: UIFarmSeedSelect → PS_FarmSeedADView.Request
-    Not wired into auto / CLI yet — API only.
-
-    Related (not implemented): PS_FarmFieldWateringADView (watering-can ad).
+    Remaining count sources:
+      - farm/info|harvest/list farm payload: `_farm._adCount`
+      - daily reset/other payload: `_farmADCount`
     """
     return client.post_encrypted("/api/farm/ad-view", {})
+
+
+def watering_ad_view(client: "ApiClient") -> dict:
+    """Watch ad to obtain watering cans.
+
+    Live capture 2026-07-27 + IL:
+      POST /api/farm/watering-ad-view  encrypted body {}
+      PS_FarmFieldWateringADView.Request() — empty RequestData
+    Response:
+      _farmWatering: {_viewCount, _adCount}
+      _rewardAllList: watering-can goods (type 203)
+
+    Remaining count sources:
+      - farm/info / watering responses: `_farmWatering._adCount`
+      - daily reset/other payload: `_farmWateringADCount`
+    """
+    return client.post_encrypted("/api/farm/watering-ad-view", {})
 
 
 # Alias matching AFK naming style.
