@@ -89,10 +89,20 @@ def build_shop_catalog(gamedata: dict, shop_list_resp: dict | None = None) -> di
         vg = vgroup.get(str(vg_key), {}) if vg_key is not None else {}
         st = live_map.get(key, {})
         limit = info.get("BuyCount")
-        used = st.get("_buyCount")
+        # Server `_buyCount` is remaining quota, not used count.
+        remain_raw = st.get("_buyCount")
         remain = None
-        if limit is not None and used is not None and int(limit) > 0:
-            remain = max(0, int(limit) - int(used))
+        used = None
+        if remain_raw is not None:
+            try:
+                remain = max(0, int(remain_raw))
+            except Exception:
+                remain = None
+            if limit is not None and remain is not None:
+                try:
+                    used = max(0, int(limit) - int(remain))
+                except Exception:
+                    used = None
         rows.append(
             {
                 "key": key,
