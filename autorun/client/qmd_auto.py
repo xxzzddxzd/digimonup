@@ -35,6 +35,8 @@ from .pvp_care import run_pvp_care
 from .pvp_care import SessionKicked as PvpSessionKicked
 from .dungeon_care import run_dungeon_auto_care
 from .dungeon_care import SessionKicked as DungeonSessionKicked
+from .shop_care import run_shop_daily_buy
+from .shop_care import SessionKicked as ShopSessionKicked
 
 LogFn = Callable[[str], None]
 
@@ -237,7 +239,7 @@ def run_auto_once(
 ) -> int:
     """Single run (crontab-friendly):
 
-    login -> farm -> dungeon(ad then burn tickets; skip 10000/10020 battle) -> lab -> mine -> dbox -> furnace -> pvp -> qmd(if ready, else skip) -> afk -> exit
+    login -> farm -> shop(daily buys) -> dungeon(ad then burn tickets; skip 10000/10020 battle) -> lab -> mine -> dbox -> furnace -> pvp -> qmd(if ready, else skip) -> afk -> exit
 
     No long sleep on intimacy cooldown. On -19006: wait 600s, re-login, finish once.
     """
@@ -279,6 +281,25 @@ def run_auto_once(
                     )
                 except FarmSessionKicked as fk:
                     raise SessionKicked(fk.where, body=fk.body) from fk
+
+                # shop: daily limited buys (Crystal/CampCoin/free Diamond)
+                try:
+                    shop = run_shop_daily_buy(session, log=log)
+                    bought = shop.get("bought") or []
+                    failed = shop.get("failed") or []
+                    _append_result_log(
+                        result_path,
+                        result="shop",
+                        detail=(
+                            f"ok={shop.get('ok')} "
+                            f"bought={len(bought)} failed={len(failed)} "
+                            f"keys={[x.get('key') for x in bought]} "
+                            f"fail_keys={[x.get('key') for x in failed]}"
+                        ),
+                        log=log,
+                    )
+                except ShopSessionKicked as sk:
+                    raise SessionKicked(sk.where, body=sk.body) from sk
 
                 # dungeon: claim remaining ads, then burn tickets (skip battle 10000/10020)
                 try:

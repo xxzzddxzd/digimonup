@@ -12,6 +12,7 @@ from . import (
     mine,
     misc,
     partner,
+    shop,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "mine",
     "misc",
     "partner",
+    "shop",
 ]

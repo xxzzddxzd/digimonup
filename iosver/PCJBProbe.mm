@@ -49,6 +49,7 @@ static int gUnityCrashHistoryFD = -1;
 static NSString *gPersistentLogPath;
 static NSString *gUnityNativeLogPath;
 static NSString *gUnityCrashHistoryPath;
+static NSString *gCryptoStatePath;
 
 typedef struct {
     bool valid;
@@ -324,6 +325,8 @@ static void PCInitializePersistentLogs(void) {
 
         gUnityCrashHistoryPath =
             [directory stringByAppendingPathComponent:@"UnityCrash-history.log"];
+        gCryptoStatePath =
+            [directory stringByAppendingPathComponent:@"session-crypto.json"];
         NSDictionary<NSFileAttributeKey, id> *crashAttributes =
             [manager attributesOfItemAtPath:gUnityCrashHistoryPath error:nil];
         if ([crashAttributes fileSize] > 4 * 1024 * 1024) {
@@ -394,6 +397,13 @@ static int32_t gLoginStoreRegionCode;
 static int32_t gLoginServerNum;
 static bool gLoginIsGuest;
 static bool gLoginAuthRequestCaptured;
+
+static pthread_mutex_t gCryptoLock = PTHREAD_MUTEX_INITIALIZER;
+static NSString *gSessionHexKey = @"";
+static NSString *gSessionHexIv = @"";
+static NSString *gSessionEncryptedKey = @"";
+static NSString *gSessionBearerKey = @"";
+static bool gSessionCryptoLogged;
 
 static NSDictionary<NSString *, id> *PCLoginInfoDictionary(bool *readyOut) {
     pthread_mutex_lock(&gLoginInfoLock);
@@ -1097,6 +1107,200 @@ static void PCRefreshLoginInfoUI(void) {
     });
 }
 
+static NSString *PCTruncateForLog(NSString *value, NSUInteger maxLength) {
+    if (!value) return @"";
+    if (value.length <= maxLength) return value;
+    return [NSString stringWithFormat:@"%@...<%lu chars total>",
+                                      [value substringToIndex:maxLength],
+                                      (unsigned long)value.length];
+}
+
+static void PCSaveSessionCryptoState(void) {
+    if (!gCryptoStatePath.length) return;
+    pthread_mutex_lock(&gCryptoLock);
+    NSString *hexKey = [gSessionHexKey copy];
+    NSString *hexIv = [gSessionHexIv copy];
+    NSString *encryptedKey = [gSessionEncryptedKey copy];
+    NSString *sessionKey = [gSessionBearerKey copy];
+    NSString *dataNo = [gLoginDataNo copy];
+    pthread_mutex_unlock(&gCryptoLock);
+
+    NSDictionary *payload = @{
+        @"hex_key" : hexKey ?: @"",
+        @"hex_iv" : hexIv ?: @"",
+        @"encrypted_key" : encryptedKey ?: @"",
+        @"session_key" : sessionKey ?: @"",
+        @"data_no" : dataNo ?: @"",
+        @"updated_at" : PCTimestamp(),
+    };
+    NSError *error = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:payload
+                                                   options:NSJSONWritingPrettyPrinted
+                                                     error:&error];
+    if (!data || error) return;
+    [data writeToFile:gCryptoStatePath atomically:YES];
+}
+
+static void PCNoteSessionCrypto(NSString *hexKey, NSString *hexIv,
+                                NSString *encryptedKey, NSString *sessionKey,
+                                const char *source) {
+    bool changed = false;
+    pthread_mutex_lock(&gCryptoLock);
+    if (hexKey.length > 0 && ![gSessionHexKey isEqualToString:hexKey]) {
+        gSessionHexKey = [hexKey copy];
+        changed = true;
+    }
+    if (hexIv.length > 0 && ![gSessionHexIv isEqualToString:hexIv]) {
+        gSessionHexIv = [hexIv copy];
+        changed = true;
+    }
+    if (encryptedKey.length > 0 &&
+        ![gSessionEncryptedKey isEqualToString:encryptedKey]) {
+        gSessionEncryptedKey = [encryptedKey copy];
+        changed = true;
+    }
+    if (sessionKey.length > 0 &&
+        ![gSessionBearerKey isEqualToString:sessionKey]) {
+        gSessionBearerKey = [sessionKey copy];
+        changed = true;
+    }
+    bool shouldLog = changed || !gSessionCryptoLogged;
+    if (shouldLog && gSessionHexKey.length > 0 && gSessionHexIv.length > 0) {
+        gSessionCryptoLogged = true;
+    } else {
+        shouldLog = changed && (sessionKey.length > 0 || encryptedKey.length > 0);
+    }
+    NSString *logKey = [gSessionHexKey copy];
+    NSString *logIv = [gSessionHexIv copy];
+    NSString *logEnc = [gSessionEncryptedKey copy];
+    NSString *logSession = [gSessionBearerKey copy];
+    pthread_mutex_unlock(&gCryptoLock);
+
+    if (shouldLog && logKey.length > 0 && logIv.length > 0) {
+        NSLog(@"#pc  Crypto.session source=%s hex_key=%@ hex_iv=%@ encrypted_key=%@ session_key=%@",
+              source ? source : "unknown",
+              logKey,
+              logIv,
+              logEnc.length ? PCTruncateForLog(logEnc, 96) : @"",
+              logSession.length ? PCTruncateForLog(logSession, 96) : @"");
+    }
+    if (changed) PCSaveSessionCryptoState();
+}
+
+static void PCCaptureCryptoFromPacketManager(void *manager, const char *source) {
+    if (!PCReadableRange(manager, 0x30)) return;
+    uint8_t *object = (uint8_t *)manager;
+    NSString *sessionKey = PCSafeStringFromIl2Cpp(*(void **)(object + 0x10));
+    NSString *encryptedKey = PCSafeStringFromIl2Cpp(*(void **)(object + 0x18));
+    NSString *hexKey = PCSafeStringFromIl2Cpp(*(void **)(object + 0x20));
+    NSString *hexIv = PCSafeStringFromIl2Cpp(*(void **)(object + 0x28));
+    PCNoteSessionCrypto(hexKey, hexIv, encryptedKey, sessionKey, source);
+}
+
+static NSString *PCExtractJSONStringField(NSString *json, NSString *field) {
+    if (!json.length || !field.length) return @"";
+    NSString *needle = [NSString stringWithFormat:@"\"%@\":\"", field];
+    NSRange start = [json rangeOfString:needle];
+    if (start.location == NSNotFound) {
+        needle = [NSString stringWithFormat:@"\"%@\": \"", field];
+        start = [json rangeOfString:needle];
+    }
+    if (start.location == NSNotFound) return @"";
+    NSUInteger valueStart = start.location + start.length;
+    if (valueStart >= json.length) return @"";
+    NSMutableString *value = [NSMutableString string];
+    for (NSUInteger index = valueStart; index < json.length; index++) {
+        unichar character = [json characterAtIndex:index];
+        if (character == '"') break;
+        if (character == '\\' && index + 1 < json.length) {
+            unichar next = [json characterAtIndex:index + 1];
+            [value appendFormat:@"%C", next];
+            index++;
+            continue;
+        }
+        [value appendFormat:@"%C", character];
+    }
+    return value;
+}
+
+// PacketManager.SetEncryptPublicKey generates this session's AES key/iv.
+static void (*orig_setEncryptPublicKey)(void *, void *, const void *);
+static void pc_setEncryptPublicKey(void *manager, void *publicKey,
+                                   const void *method) {
+    orig_setEncryptPublicKey(manager, publicKey, method);
+    PCCaptureCryptoFromPacketManager(manager, "SetEncryptPublicKey");
+}
+
+// PacketManager.GetEncryptData(plainJson) -> encrypted envelope JSON
+static void *(*orig_getEncryptData)(void *, void *, const void *);
+static void *pc_getEncryptData(void *manager, void *plainData,
+                               const void *method) {
+    PCCaptureCryptoFromPacketManager(manager, "GetEncryptData");
+    NSString *plain = PCSafeStringFromIl2Cpp(plainData);
+    if (plain.length > 0) {
+        NSLog(@"#pc  Crypto.REQ plain=%@", PCTruncateForLog(plain, 4000));
+    }
+    return orig_getEncryptData(manager, plainData, method);
+}
+
+// PacketManager.GetDecryptData(encryptedEnvelopeJson) -> plain response JSON
+static void *(*orig_getDecryptData)(void *, void *, const void *);
+static void *pc_getDecryptData(void *manager, void *encryptedData,
+                               const void *method) {
+    void *result = orig_getDecryptData(manager, encryptedData, method);
+    PCCaptureCryptoFromPacketManager(manager, "GetDecryptData");
+    NSString *plain = PCSafeStringFromIl2Cpp(result);
+    if (plain.length > 0) {
+        NSLog(@"#pc  Crypto.RESP plain=%@", PCTruncateForLog(plain, 4000));
+        NSString *sessionKey = PCExtractJSONStringField(plain, @"_sessionKey");
+        if (sessionKey.length > 0) {
+            PCNoteSessionCrypto(nil, nil, nil, sessionKey, "auth_response");
+        }
+        NSString *serverDataNo = PCExtractJSONStringField(plain, @"serverDataNo");
+        if (serverDataNo.length == 0) {
+            serverDataNo = PCExtractJSONStringField(plain, @"_serverDataNo");
+        }
+        if (serverDataNo.length > 0) {
+            pthread_mutex_lock(&gLoginInfoLock);
+            gLoginDataNo = [serverDataNo copy];
+            pthread_mutex_unlock(&gLoginInfoLock);
+            PCSaveSessionCryptoState();
+        }
+    }
+    return result;
+}
+
+// PacketSender.EncryptData() covers IsNoEncrypt APIs that skip GetEncryptData.
+static void *(*orig_packetSenderEncryptData)(void *, const void *);
+static void *pc_packetSenderEncryptData(void *sender, const void *method) {
+    void *result = orig_packetSenderEncryptData(sender, method);
+    NSString *payload = PCSafeStringFromIl2Cpp(result);
+    if (payload.length > 0 &&
+        [payload rangeOfString:@"\"_data\""].location == NSNotFound) {
+        NSLog(@"#pc  Crypto.REQ plain(noenc)=%@",
+              PCTruncateForLog(payload, 4000));
+    }
+    return result;
+}
+
+// PacketSender.DecryptData() for the response path that bypasses GetDecryptData.
+static void *(*orig_packetSenderDecryptData)(void *, void *, const void *);
+static void *pc_packetSenderDecryptData(void *sender, void *response,
+                                        const void *method) {
+    void *result = orig_packetSenderDecryptData(sender, response, method);
+    NSString *plain = PCSafeStringFromIl2Cpp(result);
+    NSString *raw = PCSafeStringFromIl2Cpp(response);
+    if (plain.length > 0 && ![plain isEqualToString:raw]) {
+        NSLog(@"#pc  Crypto.RESP plain(sender)=%@",
+              PCTruncateForLog(plain, 4000));
+        NSString *sessionKey = PCExtractJSONStringField(plain, @"_sessionKey");
+        if (sessionKey.length > 0) {
+            PCNoteSessionCrypto(nil, nil, nil, sessionKey, "sender_decrypt");
+        }
+    }
+    return result;
+}
+
 // tp.PS_Auth.SetPaketData(PS_Auth packet, string uid)
 // PSBase.reqData is +0x10; the RequestData field offsets below come from the
 // matching 1.0.3 IL2CPP dump in 103/Cpp2IL/DiffableCs.
@@ -1647,6 +1851,73 @@ static void (*orig_applicationQuit)(int, const void *);
 static void pc_applicationQuit(int exitCode, const void *method) {
     PCLogStack([NSString stringWithFormat:@"Application.Quit exitCode=%d", exitCode]);
     orig_applicationQuit(exitCode, method);
+}
+
+// Block all local asset-cache wipes (1.0.4). Log caller stacks, never run the
+// original delete path. ClientCacheClear is the main gate; the others are
+// safety nets for direct / alternate entry points.
+static void (*orig_clientCacheClear)(void *, const void *);
+static void pc_clientCacheClear(void *callback, const void *method) {
+    PCLogStack([NSString stringWithFormat:
+                @"BLOCK ClientCacheClear callback=%p method=%p (no clear)",
+                callback, method]);
+}
+
+static void (*orig_clearCacheByKeywords)(const void *);
+static void pc_clearCacheByKeywords(const void *method) {
+    PCLogStack([NSString stringWithFormat:
+                @"BLOCK ClearCacheByKeywords method=%p (no clear)", method]);
+}
+
+static void (*orig_listAllCachedFiles)(const void *);
+static void pc_listAllCachedFiles(const void *method) {
+    // Listing only; allow original but record that a clear path is starting.
+    PCLogStack([NSString stringWithFormat:
+                @"ListAllCachedFiles method=%p (allowed, clear precursor)", method]);
+    if (orig_listAllCachedFiles) {
+        orig_listAllCachedFiles(method);
+    }
+}
+
+static void (*orig_clearOldCache)(const void *);
+static void pc_clearOldCache(const void *method) {
+    PCLogStack([NSString stringWithFormat:
+                @"BLOCK ClearOldCache method=%p (no clear)", method]);
+}
+
+static void (*orig_deleteAssetBundleCache)(const void *);
+static void pc_deleteAssetBundleCache(const void *method) {
+    PCLogStack([NSString stringWithFormat:
+                @"BLOCK DeleteAssetBundleCache method=%p (no clear)", method]);
+}
+
+static void (*orig_cancelResourceDownload)(void *, void *, const void *);
+static void pc_cancelResourceDownload(void *instance, void *callback, const void *method) {
+    PCLogStack([NSString stringWithFormat:
+                @"BLOCK CancelResourceDownload instance=%p callback=%p method=%p (no clear)",
+                instance, callback, method]);
+}
+
+static void (*orig_uiLoginMessageBoxOnAppQuit)(void *, const void *);
+static void pc_uiLoginMessageBoxOnAppQuit(void *instance, const void *method) {
+    PCLogStack([NSString stringWithFormat:
+                @"BLOCK UILoginMessageBox.OnApplicationQuit instance=%p method=%p (no clear)",
+                instance, method]);
+}
+
+static bool (*orig_cachingClearCache0)(const void *);
+static bool pc_cachingClearCache0(const void *method) {
+    PCLogStack([NSString stringWithFormat:
+                @"BLOCK Caching.ClearCache() method=%p (no clear)", method]);
+    return false;
+}
+
+static bool (*orig_cachingClearCacheInt)(int, const void *);
+static bool pc_cachingClearCacheInt(int expiration, const void *method) {
+    PCLogStack([NSString stringWithFormat:
+                @"BLOCK Caching.ClearCache(int) expiration=%d method=%p (no clear)",
+                expiration, method]);
+    return false;
 }
 
 static void (*orig_obscuredCheater)(void *, const void *);
@@ -3072,6 +3343,35 @@ static void PCInstallUnityHooks(intptr_t slide) {
            (void **)&orig_globalQuit, "GlobalObject.Quit_0x329A278");
     PCHook((void *)(slide + 0x69A5E4C), (void *)pc_applicationQuit,
            (void **)&orig_applicationQuit, "Application.Quit_0x69A5E4C");
+
+    // Never allow local game-data / Addressables cache wipes on 1.0.4.
+    PCHook((void *)(slide + 0x32600E0), (void *)pc_clientCacheClear,
+           (void **)&orig_clientCacheClear,
+           "DataUtil.ClientCacheClear_block_0x32600E0");
+    PCHook((void *)(slide + 0x2CFDF90), (void *)pc_clearCacheByKeywords,
+           (void **)&orig_clearCacheByKeywords,
+           "SelectiveCacheCleaner.ClearCacheByKeywords_block_0x2CFDF90");
+    PCHook((void *)(slide + 0x2CFE478), (void *)pc_listAllCachedFiles,
+           (void **)&orig_listAllCachedFiles,
+           "SelectiveCacheCleaner.ListAllCachedFiles_log_0x2CFE478");
+    PCHook((void *)(slide + 0x2CFC040), (void *)pc_clearOldCache,
+           (void **)&orig_clearOldCache,
+           "CacheCleaner.ClearOldCache_block_0x2CFC040");
+    PCHook((void *)(slide + 0x32609A0), (void *)pc_deleteAssetBundleCache,
+           (void **)&orig_deleteAssetBundleCache,
+           "DataUtil.DeleteAssetBundleCache_block_0x32609A0");
+    PCHook((void *)(slide + 0x2F14C10), (void *)pc_cancelResourceDownload,
+           (void **)&orig_cancelResourceDownload,
+           "UILoginMessageBox.CancelResourceDownload_block_0x2F14C10");
+    PCHook((void *)(slide + 0x2F14D10), (void *)pc_uiLoginMessageBoxOnAppQuit,
+           (void **)&orig_uiLoginMessageBoxOnAppQuit,
+           "UILoginMessageBox.OnApplicationQuit_block_0x2F14D10");
+    PCHook((void *)(slide + 0x69A959C), (void *)pc_cachingClearCache0,
+           (void **)&orig_cachingClearCache0,
+           "Caching.ClearCache_block_0x69A959C");
+    PCHook((void *)(slide + 0x69A95DC), (void *)pc_cachingClearCacheInt,
+           (void **)&orig_cachingClearCacheInt,
+           "Caching.ClearCache_int_block_0x69A95DC");
     PCHook((void *)(slide + 0x329D33C), (void *)pc_obscuredCheater,
            (void **)&orig_obscuredCheater, "OnObscuredCheaterDetected_0x329D33C");
     PCHook((void *)(slide + 0x329D66C), (void *)pc_speedCheater,
@@ -3091,6 +3391,21 @@ static void PCInstallUnityHooks(intptr_t slide) {
     PCHook((void *)(slide + 0x2DBC9D0), (void *)pc_timeRewardGetRemainTime,
            (void **)&orig_timeRewardGetRemainTime,
            "TimeRewardListParam.GetRemainTime_AdRemove_0x2DBC9D0");
+    PCHook((void *)(slide + 0x2CEF2A8), (void *)pc_setEncryptPublicKey,
+           (void **)&orig_setEncryptPublicKey,
+           "PacketManager.SetEncryptPublicKey_capture_crypto_0x2CEF2A8");
+    PCHook((void *)(slide + 0x2CEF394), (void *)pc_getEncryptData,
+           (void **)&orig_getEncryptData,
+           "PacketManager.GetEncryptData_capture_plain_0x2CEF394");
+    PCHook((void *)(slide + 0x2CEF598), (void *)pc_getDecryptData,
+           (void **)&orig_getDecryptData,
+           "PacketManager.GetDecryptData_capture_plain_0x2CEF598");
+    PCHook((void *)(slide + 0x2CF2DF0), (void *)pc_packetSenderEncryptData,
+           (void **)&orig_packetSenderEncryptData,
+           "PacketSender.EncryptData_capture_plain_0x2CF2DF0");
+    PCHook((void *)(slide + 0x2CF2F9C), (void *)pc_packetSenderDecryptData,
+           (void **)&orig_packetSenderDecryptData,
+           "PacketSender.DecryptData_capture_plain_0x2CF2F9C");
     PCHook((void *)(slide + 0x2ED0D94), (void *)pc_authSetPaketData,
            (void **)&orig_authSetPaketData,
            "PS_Auth.SetPaketData_capture_login_0x2ED0D94");
@@ -3220,12 +3535,92 @@ static void PCImageAdded(const struct mach_header *header, intptr_t slide) {
     }
 }
 
+static bool PCTryHookHandle(void *handle, const char *source) {
+    if (!handle) return false;
+
+    // Match the known-good device binary: accept the first non-null export for
+    // each symbol, then require MSHookFunction before treating the backend as
+    // ready.  MSHookMemory is best-effort (instruction patches need it).
+    void *hookFunction = dlsym(handle, "MSHookFunction");
+    void *hookMemory = dlsym(handle, "MSHookMemory");
+    if (hookFunction && !gHookFunction) {
+        gHookFunction = (MSHookFunctionType)hookFunction;
+    }
+    if (hookMemory && !gHookMemory) {
+        gHookMemory = (MSHookMemoryType)hookMemory;
+    }
+
+    if (hookFunction || hookMemory) {
+        NSLog(@"#pc  hook api via %s handle=%p hooker=%p memory=%p",
+              source ? source : "(null)", handle, gHookFunction, gHookMemory);
+    }
+    return gHookFunction != nullptr;
+}
+
+// Device-proven open policy:
+// 1) RTLD_NOLOAD if the image is already mapped
+// 2) otherwise actually load it with RTLD_NOW|RTLD_GLOBAL
+// The previous local port kept RTLD_NOLOAD on the fallback path, so cold
+// starts never resolved MSHookFunction and all native hooks failed.
+static void *PCOpenHookProvider(const char *path) {
+    if (!path || !path[0]) return nullptr;
+    void *handle = dlopen(path, RTLD_NOLOAD);
+    if (handle) return handle;
+    handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+    if (!handle) {
+        const char *error = dlerror();
+        NSLog(@"#pc  hook provider open failed path=%s error=%s",
+              path, error ? error : "(null)");
+    }
+    return handle;
+}
+
+static bool PCLooksLikeHookProvider(const char *imageName) {
+    if (!imageName) return false;
+    return strstr(imageName, "libellekit") ||
+           strstr(imageName, "libsubstrate") ||
+           strstr(imageName, "libblackjack") ||
+           strstr(imageName, "libhooker") ||
+           strstr(imageName, "CydiaSubstrate");
+}
+
+static void PCResolveHookAPI(void) {
+    if (PCTryHookHandle(RTLD_DEFAULT, "RTLD_DEFAULT")) return;
+
+    static const char *kPaths[] = {
+        "/var/jb/usr/lib/libellekit.dylib",
+        "/var/jb/usr/lib/libsubstrate.dylib",
+        "/var/jb/usr/lib/libblackjack.dylib",
+        "/var/jb/usr/lib/libhooker.dylib",
+        "/var/jb/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate",
+        "/usr/lib/libsubstrate.dylib",
+        "/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate",
+        "libellekit.dylib",
+        "libsubstrate.dylib",
+    };
+    for (size_t index = 0; index < sizeof(kPaths) / sizeof(kPaths[0]); index++) {
+        void *handle = PCOpenHookProvider(kPaths[index]);
+        if (PCTryHookHandle(handle, kPaths[index])) return;
+    }
+
+    uint32_t imageCount = _dyld_image_count();
+    for (uint32_t index = 0; index < imageCount; index++) {
+        const char *imageName = _dyld_get_image_name(index);
+        if (!PCLooksLikeHookProvider(imageName)) continue;
+        void *handle = PCOpenHookProvider(imageName);
+        const char *source = imageName && imageName[0] ? imageName : "dyld-image";
+        if (PCTryHookHandle(handle, source)) return;
+    }
+}
+
 static void PCInstallSymbolHooks(void) {
     void *(*lookup)(void *, const char *) = dlsym;
-    gHookFunction = (MSHookFunctionType)lookup(RTLD_DEFAULT, "MSHookFunction");
-    gHookMemory = (MSHookMemoryType)lookup(RTLD_DEFAULT, "MSHookMemory");
+    PCResolveHookAPI();
     NSLog(@"#pc  symbol hooker=%p memory=%p", gHookFunction, gHookMemory);
-    if (!gHookFunction) return;
+    if (!gHookFunction) {
+        NSLog(@"#pc  MSHookFunction unavailable; native hooks skipped (ObjC hooks / overlay still work)");
+        return;
+    }
 
 #define PC_HOOK_SYMBOL(symbolName, replacement, original) \
     PCHook(lookup(RTLD_DEFAULT, symbolName), (void *)replacement, (void **)&original, symbolName)

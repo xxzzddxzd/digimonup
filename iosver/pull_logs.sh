@@ -22,6 +22,9 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 scp -P "$PORT" $SSH_OPTIONS "$DEVICE:$REMOTE_DIR/*.log" "$OUTPUT_DIR/"
+if ssh -p "$PORT" $SSH_OPTIONS "$DEVICE" "test -f '$REMOTE_DIR/session-crypto.json'"; then
+    scp -P "$PORT" $SSH_OPTIONS "$DEVICE:$REMOTE_DIR/session-crypto.json" "$OUTPUT_DIR/"
+fi
 
 REMOTE_IPS=$(ssh -p "$PORT" $SSH_OPTIONS "$DEVICE" \
     'find /var/mobile/Library/Logs/CrashReporter -maxdepth 1 -type f -name "DIGIMONUP-*.ips" -print 2>/dev/null | sort | tail -n 1')
