@@ -3,7 +3,7 @@
 Policy (user):
   - Targets: daily-limited shops excluding Cash / paid Diamond / AD / Shop_PVPCoin
   - Keep free Diamond (cost 0), Crystal, CampCoin
-  - Fetch /api/shop/list, compute remain = limit - buyCount
+  - Fetch /api/shop/list; server `_buyCount` is remaining quota
   - If remain > 0, POST /api/shop/buy with {_key, _count: remain}
 """
 from __future__ import annotations
@@ -89,14 +89,21 @@ def _as_int(v: Any, default: int = 0) -> int:
 
 
 def remain_for(key: int, *, limit: int, state: dict | None) -> int:
-    """Remaining daily buys. Missing state => assume unused (full limit)."""
+    """Remaining daily buys.
+
+    Server `_buyCount` is **remaining** quota (not used).
+    Confirmed via /api/shop/buy and AD shop/spawn responses:
+      limit=2 -> buyCount 1 after first, 0 after second.
+    Missing state => assume full limit still available.
+    """
     lim = max(0, int(limit))
     if lim <= 0:
         return 0
     if not state:
         return lim
-    used = _as_int(state.get("_buyCount", state.get("buyCount")), 0)
-    return max(0, lim - used)
+    # Prefer explicit remaining field; clamp to table limit.
+    rem = _as_int(state.get("_buyCount", state.get("buyCount")), 0)
+    return max(0, min(lim, rem))
 
 
 def plan_daily_buys(shop_list_resp: Any) -> list[dict[str, Any]]:
@@ -105,14 +112,16 @@ def plan_daily_buys(shop_list_resp: Any) -> list[dict[str, Any]]:
     for key, limit, currency, cost in DAILY_BUY_TARGETS:
         st = state.get(int(key))
         rem = remain_for(int(key), limit=int(limit), state=st)
+        used = max(0, int(limit) - int(rem)) if st is not None else 0
         plan.append(
             {
                 "key": int(key),
                 "limit": int(limit),
                 "currency": currency,
                 "cost": int(cost),
-                "used": _as_int((st or {}).get("_buyCount"), 0) if st else 0,
+                "used": int(used),
                 "remain": int(rem),
+                "buyCount_raw": _as_int((st or {}).get("_buyCount"), 0) if st else None,
                 "in_list": st is not None,
             }
         )
