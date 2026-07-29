@@ -47,8 +47,10 @@ python3 main.py slzt -l 4 -t 2
 
 slzt 开打后，终端只显示当前层数和该轮掉落；HTTP、登录、状态码、汇总及
 结果文件提示均静默。1.1.1 实测协议固定使用
-`region=100000`、`stage=1`、`attr=3`，并把层数同时作为
-`sector` 和 `repeat`。流程为 `dungeon/start` → 按 start 返回的 mob UID
+`region=100000`、`attr=3`；每 10 层轮换一次战斗位置：
+`stage=((层数-1)//10)+1`、`sector=((层数-1)%10)+1`，`repeat` 保留完整层数。
+例如第 11 层为 `stage=2, sector=1, repeat=11`。流程为
+`dungeon/start` → 按 start 返回的 mob UID
 调用共享的 `battle/kill-mob` → `dungeon/end`；不会把持续中的主战斗请求或
 每日灵魂奖励请求并入该流程。
 

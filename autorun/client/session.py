@@ -231,6 +231,7 @@ class GameSession:
         floor = int(level)
         if floor < 1:
             raise ValueError(f"slzt level must be >= 1, got {floor}")
+        stage, sector = dungeon.lost_tower_battle_position(floor)
 
         def response_code(body: Any) -> Optional[int]:
             if not isinstance(body, dict):
@@ -244,16 +245,16 @@ class GameSession:
             "ok": False,
             "level": floor,
             "region": dungeon.LOST_TOWER_REGION,
-            "stage": dungeon.LOST_TOWER_STAGE,
-            "sector": floor,
+            "stage": stage,
+            "sector": sector,
             "repeat": floor,
         }
 
         self.last_battle_start = dungeon.dungeon_start(
             self.client,
             region=dungeon.LOST_TOWER_REGION,
-            stage=dungeon.LOST_TOWER_STAGE,
-            sector=floor,
+            stage=stage,
+            sector=sector,
             level=floor,
             wave=0,
             state=battle.STATE_FORWARD,
