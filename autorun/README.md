@@ -28,18 +28,25 @@ python3 main.py --input 你的抓包.chlsj
 | `python3 main.py ts` | **数码世界 / 探索** Textual 交互 TUI：鼠标点格行走 / 钻头 / 冲锋 / 领里程（`mine` 为别名） |
 | `python3 main.py zb` | **开装备**：spawn-and-sell（默认每批 8）；`--info` 看炉子快照 |
 | `python3 main.py fb 1` / `fb 2` / `fb 3` | 清一次副本（有通关层优先 sweep；否则 start/end） |
-| `python3 main.py slzt -l 4 -t 2` | 连续清失落之塔指定层；`-l` 为层数，`-t` 为次数 |
+| `python3 main.py slzt` | 从失落之塔当前进度的下一层持续推进，`Ctrl+C` 停止 |
+| `python3 main.py slzt -l 4 -t 2` | 连续清指定层；`-l` 为层数，`-t` 为次数 |
 
 无参数时打印 help 与示例。需要 `ts` 时请安装依赖：`pip install -r requirements.txt`（含 `textual`）。
 
 ### 失落之塔 slzt
 
 ```bash
+python3 main.py slzt
 python3 main.py slzt -l 4 -t 2
 ```
 
-`-l x` 指定第 `x` 层，`-t x` 指定连续挑战次数（默认 1 次）。多次挑战
-复用同一次登录会话，每次单独打印掉落；任意一次失败后停止。1.1.1 实测协议固定使用
+不带参数时读取失落之塔 key 9 的最高通关层，从下一层开始持续推进，
+直到按 `Ctrl+C`。`-l x` 指定固定层，`-t x` 指定挑战次数；只带 `-l`
+时默认打 1 次，只带 `-t` 时从当前进度向前推进指定次数。多次挑战复用
+同一次登录会话，任意一次失败后停止。
+
+slzt 开打后，终端只显示当前层数和该轮掉落；HTTP、登录、状态码、汇总及
+结果文件提示均静默。1.1.1 实测协议固定使用
 `region=100000`、`stage=1`、`attr=3`，并把层数同时作为
 `sector` 和 `repeat`。流程为 `dungeon/start` → 按 start 返回的 mob UID
 调用共享的 `battle/kill-mob` → `dungeon/end`；不会把持续中的主战斗请求或

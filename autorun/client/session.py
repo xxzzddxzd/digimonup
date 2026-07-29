@@ -362,6 +362,34 @@ class GameSession:
             result["error"] = "dungeon_end_failed"
         return result
 
+    def slzt_next_level(self) -> int:
+        """Return the next uncleared Lost Tower floor from dungeon key 9."""
+        body = dungeon.dungeon_list(self.client)
+        try:
+            code = int(body.get("_code", 0))
+        except (AttributeError, TypeError, ValueError):
+            code = 0
+        if code < 0:
+            raise ApiError(
+                f"lost tower progress failed code={code}",
+                body=body,
+            )
+
+        rows = dungeon.extract_dungeon_list(body)
+        if not rows:
+            rows = dungeon.extract_dungeon_list(self.init_data)
+        progress = dungeon.find_dungeon_progress(
+            rows,
+            dungeon.LOST_TOWER_DUNGEON_KEY,
+        )
+        if not progress:
+            return 1
+        try:
+            cleared_level = int(progress.get("_level", 0) or 0)
+        except (TypeError, ValueError):
+            cleared_level = 0
+        return max(1, cleared_level + 1)
+
     def clear_session_crypto(self) -> None:
         """Drop bearer/session crypto so the next bootstrap does a fresh auth."""
         self.client.session_key = None
