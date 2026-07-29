@@ -316,6 +316,86 @@ def cmd_fb(alias: str, *, level: int | None = None) -> int:
         print(f"[*] wrote {dump_path}")
 
 
+def cmd_slzt(*, level: int, times: int = 1) -> int:
+    """Clear one specified Lost Tower (失落之塔) floor repeatedly."""
+    run_count = int(times)
+    if run_count < 1:
+        raise ValueError(f"slzt times must be >= 1, got {run_count}")
+    session = _load_session()
+    session.client.log_enabled = True
+    result: dict = {
+        "ok": False,
+        "mode": "slzt",
+        "level": int(level),
+        "times": run_count,
+        "completed": 0,
+        "runs": [],
+    }
+    try:
+        session.run_login_pipeline()
+        print("[+] login pipeline ok")
+        for run_index in range(1, run_count + 1):
+            if run_index > 1:
+                session.ensure_heartbeat()
+            print(f"[*] slzt run={run_index}/{run_count} floor={level}")
+            care = session.slzt(level=int(level))
+            result["runs"].append(care)
+            result["slzt"] = care  # latest run, kept for backward compatibility
+            print(
+                f"[*] slzt start={care.get('start_code')} "
+                f"mobs={len(care.get('mob_uid_list') or [])} "
+                f"kill={care.get('kill_code')} end={care.get('end_code')}"
+            )
+            dungeon = care.get("dungeon")
+            if isinstance(dungeon, dict):
+                print(
+                    f"[+] slzt dungeon key={dungeon.get('_key')} "
+                    f"level={dungeon.get('_level')} "
+                    f"challenge={dungeon.get('_challengeLevel')}"
+                )
+            drops = care.get("drops") or []
+            if drops:
+                print(f"[+] slzt drops ({len(drops)}):")
+                for index, drop in enumerate(drops, 1):
+                    detail = drop.get("soul")
+                    detail_text = ""
+                    if isinstance(detail, dict):
+                        detail_text = (
+                            f" soul_type={detail.get('type')} grade={detail.get('grade')} "
+                            f"level={detail.get('level')} uid={detail.get('uid')}"
+                        )
+                    print(
+                        f"    {index}. {drop.get('label')} x{drop.get('count')}"
+                        f"{detail_text}"
+                    )
+            elif care.get("ok"):
+                print("[*] slzt drops: none")
+            if not care.get("ok"):
+                print(f"[-] slzt failed: {care.get('error')}")
+                break
+
+        result["completed"] = len(result["runs"])
+        result["ok"] = (
+            result["completed"] == run_count
+            and all(bool(run.get("ok")) for run in result["runs"])
+        )
+        print(
+            f"[*] slzt summary completed={result['completed']}/{run_count} "
+            f"ok={result['ok']}"
+        )
+        return 0 if result["ok"] else 1
+    except Exception as exc:
+        result["error"] = str(exc)
+        result["trace"] = traceback.format_exc()
+        print("[-] FAILED:", exc)
+        traceback.print_exc()
+        return 1
+    finally:
+        dump_path = Path("last_slzt.json")
+        dump_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[*] wrote {dump_path}")
+
+
 
 
 def main() -> int:
@@ -343,8 +423,8 @@ def main() -> int:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("runloop", "auto", "ts", "mine", "zb", "pvp", "fb", "dungeon"),
-        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场; fb: 副本",
+        choices=("runloop", "auto", "ts", "mine", "zb", "pvp", "fb", "dungeon", "slzt"),
+        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场; fb: 副本; slzt: 失落之塔",
     )
     parser.add_argument(
         "--total",
@@ -394,10 +474,18 @@ def main() -> int:
         help="fb: dungeon progress key override",
     )
     parser.add_argument(
+        "-l",
         "--level",
         type=int,
         default=None,
-        help="fb: dungeon level (_repeat); default from /api/dungeon/list _level",
+        help="slzt: target floor (required); fb: dungeon level (_repeat)",
+    )
+    parser.add_argument(
+        "-t",
+        "--times",
+        type=int,
+        default=1,
+        help="slzt: number of clears in the same login session (default 1)",
     )
     args = parser.parse_args()
 
@@ -412,6 +500,14 @@ def main() -> int:
         return cmd_ts()
     if args.command == "pvp":
         return cmd_pvp()
+    if args.command == "slzt":
+        if args.level is None or int(args.level) < 1:
+            print("[-] slzt requires a positive floor, e.g. python3 main.py slzt -l 4")
+            return 2
+        if int(args.times) < 1:
+            print("[-] slzt requires positive times, e.g. python3 main.py slzt -l 4 -t 2")
+            return 2
+        return cmd_slzt(level=int(args.level), times=int(args.times))
     if args.command in ("fb", "dungeon"):
         alias = args.fb_key if args.fb_key is not None else (str(args.key) if args.key is not None else None)
         if alias is None:
@@ -444,6 +540,7 @@ def main() -> int:
     print("  python3 main.py fb 1")
     print("  python3 main.py fb 2 --level 56")
     print("  python3 main.py fb 3")
+    print("  python3 main.py slzt -l 4 -t 2")
     return 2
 
 

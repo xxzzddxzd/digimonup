@@ -6,9 +6,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .apis import account, battle, misc
+from .apis import account, battle, dungeon, misc
 from .config import ClientConfig
 from .crypto import build_encrypted_key, generate_hex_iv, generate_hex_key
+from .drops import reward_label
 from .http_client import ApiClient, ApiError
 
 
@@ -219,6 +220,147 @@ class GameSession:
             damage=damage,
         )
         return self.last_battle_end
+
+    def slzt(self, *, level: int) -> dict:
+        """Clear one Lost Tower (失落之塔) floor from the 1.1.1 live protocol.
+
+        Lost Tower uses dungeon start/end, while mob settlement still goes
+        through the shared /api/battle/kill-mob endpoint. The captured client
+        submits kill-mob with wave=0 even though start labels the spawn wave 1.
+        """
+        floor = int(level)
+        if floor < 1:
+            raise ValueError(f"slzt level must be >= 1, got {floor}")
+
+        def response_code(body: Any) -> Optional[int]:
+            if not isinstance(body, dict):
+                return None
+            try:
+                return int(body.get("_code", 0))
+            except (TypeError, ValueError):
+                return None
+
+        result: dict[str, Any] = {
+            "ok": False,
+            "level": floor,
+            "region": dungeon.LOST_TOWER_REGION,
+            "stage": dungeon.LOST_TOWER_STAGE,
+            "sector": floor,
+            "repeat": floor,
+        }
+
+        self.last_battle_start = dungeon.dungeon_start(
+            self.client,
+            region=dungeon.LOST_TOWER_REGION,
+            stage=dungeon.LOST_TOWER_STAGE,
+            sector=floor,
+            level=floor,
+            wave=0,
+            state=battle.STATE_FORWARD,
+            attr=battle.ATTR_IN_DUNGEON,
+        )
+        start = self.last_battle_start
+        result["start"] = start
+        result["start_code"] = response_code(start)
+        if result["start_code"] not in (0, None):
+            result["error"] = "dungeon_start_failed"
+            return result
+
+        battle_info = start.get("_battle")
+        if isinstance(battle_info, dict):
+            self.battle_info = battle_info
+
+        mob_uids: list[str] = []
+        spawn = start.get("_spawnMobList")
+        entries = spawn.get("_list") if isinstance(spawn, dict) else None
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                mob_list = entry.get("_mobList")
+                mobs = mob_list.get("_list") if isinstance(mob_list, dict) else None
+                if not isinstance(mobs, list):
+                    continue
+                for mob in mobs:
+                    if not isinstance(mob, dict):
+                        continue
+                    uid = mob.get("_uid") or mob.get("_mobUID")
+                    if uid:
+                        mob_uids.append(str(uid))
+
+        result["mob_uid_list"] = mob_uids
+        if not mob_uids:
+            result["error"] = "no_spawn_mob_uid"
+            return result
+
+        # UID correlation identifies this shared battle request as the tower
+        # kill. Do not associate adjacent background-stage kill requests.
+        kill = battle.battle_kill_mob(
+            self.client,
+            wave=0,
+            mob_uid_list=mob_uids,
+            reason=battle.REASON_NONE,
+        )
+        result["kill"] = kill
+        result["kill_code"] = response_code(kill)
+        if result["kill_code"] not in (0, None):
+            result["error"] = "battle_kill_mob_failed"
+            return result
+
+        self.last_battle_end = dungeon.dungeon_end(
+            self.client,
+            region=dungeon.LOST_TOWER_REGION,
+            reason=battle.REASON_CLEAR,
+            state=battle.STATE_FORWARD,
+            damage="0",
+            send_damage="0",
+            receive_damage="0",
+            speed=5.0,
+        )
+        end = self.last_battle_end
+        result["end"] = end
+        result["end_code"] = response_code(end)
+        result["dungeon"] = end.get("_dungeon") if isinstance(end, dict) else None
+
+        reward_all = end.get("_rewardAllList") if isinstance(end, dict) else None
+        reward_box = reward_all.get("_rewardList") if isinstance(reward_all, dict) else None
+        reward_rows = reward_box.get("_list") if isinstance(reward_box, dict) else None
+        soul_box = reward_all.get("_soulList") if isinstance(reward_all, dict) else None
+        soul_rows = soul_box.get("_list") if isinstance(soul_box, dict) else None
+        unused_souls = [
+            dict(row) for row in (soul_rows or []) if isinstance(row, dict)
+        ]
+        drops: list[dict[str, Any]] = []
+        for row in reward_rows or []:
+            if not isinstance(row, dict):
+                continue
+            reward_type = int(row.get("_type", 0) or 0)
+            value = row.get("_value")
+            drop: dict[str, Any] = {
+                "type": reward_type,
+                "value": value,
+                "count": int(row.get("_count", 0) or 0),
+                "label": reward_label(reward_type, value),
+            }
+            if reward_type == 8:
+                for index, soul in enumerate(unused_souls):
+                    if soul.get("_key") != value:
+                        continue
+                    drop["soul"] = {
+                        "uid": soul.get("_uid"),
+                        "key": soul.get("_key"),
+                        "type": soul.get("_type"),
+                        "grade": soul.get("_grade"),
+                        "level": soul.get("_level"),
+                    }
+                    unused_souls.pop(index)
+                    break
+            drops.append(drop)
+        result["drops"] = drops
+        result["ok"] = result["end_code"] in (0, None)
+        if not result["ok"]:
+            result["error"] = "dungeon_end_failed"
+        return result
 
     def clear_session_crypto(self) -> None:
         """Drop bearer/session crypto so the next bootstrap does a fresh auth."""

@@ -102,6 +102,12 @@ REGION_PVP = 3
 REGION_SOUL_DUNGEON = 4
 REGION_GUILD_DUNGEON = 5
 
+# Lost Tower (失落之塔) does not use the normal DungeonInfo stageKey/region.
+# Live 1.1.1 capture: region=100000, stage=1, sector=repeat=selected floor.
+LOST_TOWER_DUNGEON_KEY = 9
+LOST_TOWER_REGION = 100000
+LOST_TOWER_STAGE = 1
+
 # Re-export common battle enums for dungeon callers.
 ATTR_INIT = battle_api.ATTR_INIT
 ATTR_PLAY = battle_api.ATTR_PLAY
