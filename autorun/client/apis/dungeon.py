@@ -102,11 +102,11 @@ REGION_PVP = 3
 REGION_SOUL_DUNGEON = 4
 REGION_GUILD_DUNGEON = 5
 
-# Lost Tower (失落之塔) uses the global Sector table in groups of 10 floors.
-# Live floor 4: stage=1, sector=4, repeat=4. GameData floor 11 maps to
-# StageKey=2/Index=1, so repeat stays the full floor while stage/sector rotate.
+# Lost Tower (失落之塔) keeps the soul dungeon Stage.Index=1 and cycles only
+# its sector every 10 floors. repeat stays the full display floor.
 LOST_TOWER_DUNGEON_KEY = 9
 LOST_TOWER_REGION = 100000
+LOST_TOWER_STAGE = 1
 LOST_TOWER_SECTORS_PER_STAGE = 10
 
 
@@ -115,9 +115,8 @@ def lost_tower_battle_position(level: int) -> tuple[int, int]:
     floor = int(level)
     if floor < 1:
         raise ValueError(f"lost tower level must be >= 1, got {floor}")
-    stage = ((floor - 1) // LOST_TOWER_SECTORS_PER_STAGE) + 1
     sector = ((floor - 1) % LOST_TOWER_SECTORS_PER_STAGE) + 1
-    return stage, sector
+    return LOST_TOWER_STAGE, sector
 
 # Re-export common battle enums for dungeon callers.
 ATTR_INIT = battle_api.ATTR_INIT
