@@ -323,6 +323,7 @@ def cmd_slzt(*, level: int | None = None, times: int | None = None) -> int:
         raise ValueError(f"slzt level must be >= 1, got {fixed_level}")
     if times is not None and int(times) < 1:
         raise ValueError(f"slzt times must be >= 1, got {times}")
+    show_total = times is not None
     run_limit = int(times) if times is not None else (1 if fixed_level is not None else None)
     auto_advance = fixed_level is None
 
@@ -345,26 +346,12 @@ def cmd_slzt(*, level: int | None = None, times: int | None = None) -> int:
             if run_index > 0:
                 session.ensure_heartbeat()
             run_index += 1
-            print(f"失落之塔 第 {current_level} 层")
+            count_text = f"{run_index}/{run_limit}" if show_total else str(run_index)
+            print(f"失落之塔 第 {current_level} 层｜第 {count_text} 次")
             care = session.slzt(level=current_level)
             result["runs"].append(care)
             result["slzt"] = care  # latest run, kept for backward compatibility
             result["completed"] = len(result["runs"])
-            drops = care.get("drops") or []
-            if drops:
-                for drop in drops:
-                    detail = drop.get("soul")
-                    detail_text = ""
-                    if isinstance(detail, dict):
-                        detail_text = (
-                            f"，品级 {detail.get('grade')}，类型 {detail.get('type')}"
-                        )
-                    drop_text = f"  掉落 {drop.get('label')} x{drop.get('count')}"
-                    if detail_text:
-                        drop_text += f"（{detail_text.lstrip('，')}）"
-                    print(drop_text)
-            elif care.get("ok"):
-                print("  掉落 无")
             if not care.get("ok"):
                 result["error"] = care.get("error") or "slzt_failed"
                 print(f"失落之塔失败：{result['error']}", file=sys.stderr)
