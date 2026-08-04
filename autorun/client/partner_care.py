@@ -281,6 +281,130 @@ def _partner_switch_key(partner: dict) -> Optional[int]:
     return None
 
 
+
+ACTIVE_LEVEL_MAX = 90  # after qmd, active partner must not exceed this (switch if >)
+
+
+def _partner_level(partner: Optional[dict]) -> Optional[int]:
+    if not partner:
+        return None
+    v = partner.get("level")
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+
+def ensure_active_partner_under_level(
+    session: GameSession,
+    partners: list[dict],
+    *,
+    current_key: Any = None,
+    max_level: int = ACTIVE_LEVEL_MAX,
+    log=print,
+) -> dict:
+    """If current/last active partner character level > max_level, switch to one < max_level.
+
+    Used after intimacy claims so the leftover active partner is not over-level.
+    """
+    out: dict = {
+        "switched": False,
+        "from_key": current_key,
+        "from_level": None,
+        "to_key": None,
+        "to_level": None,
+        "reason": None,
+        "change_character": None,
+    }
+    if not partners:
+        out["reason"] = "no partners"
+        return out
+
+    by_key: dict[str, dict] = {
+        str(p.get("key")): p for p in partners if p.get("key") is not None
+    }
+    current: Optional[dict] = None
+    if current_key is not None:
+        current = by_key.get(str(current_key))
+    if current is None:
+        # Fall back: if only one partner, treat it as active.
+        if len(partners) == 1:
+            current = partners[0]
+            current_key = current.get("key")
+            out["from_key"] = current_key
+        else:
+            out["reason"] = "no current partner key"
+            return out
+
+    lv = _partner_level(current)
+    out["from_level"] = lv
+    if lv is None:
+        out["reason"] = "level unknown"
+        log(f"[!] qmd active ensure: key={current_key} level unknown; skip")
+        return out
+    if lv <= max_level:
+        out["reason"] = f"level={lv}<={max_level}"
+        log(f"[*] qmd active partner key={current_key} level={lv} ok (<= {max_level})")
+        return out
+
+    candidates: list[dict] = []
+    for p in partners:
+        pl = _partner_level(p)
+        if pl is None or pl >= max_level:
+            continue
+        if p.get("key") is None:
+            continue
+        if str(p.get("key")) == str(current_key):
+            continue
+        candidates.append(p)
+    if not candidates:
+        out["reason"] = f"level={lv}>{max_level} but no partner with level<{max_level}"
+        log(
+            f"[!] qmd active partner key={current_key} level={lv}>{max_level}; "
+            f"no partner with level<{max_level} to switch"
+        )
+        return out
+
+    def _cand_key(p: dict) -> tuple:
+        try:
+            return (int(p.get("level") or 999), int(p.get("key")))
+        except Exception:
+            return (999, 0)
+
+    target = sorted(candidates, key=_cand_key)[0]
+    tkey = _partner_switch_key(target)
+    if tkey is None:
+        out["reason"] = "target has no switch key"
+        return out
+
+    ch = partner_api.change_character(session.client, key=tkey)
+    out["change_character"] = {
+        "code": ch.get("_code"),
+        "message": ch.get("_message"),
+        "key": tkey,
+    }
+    code = ch.get("_code", 0)
+    if code not in (0, None):
+        out["reason"] = f"change-character code={code}"
+        log(
+            f"[-] qmd active switch key={current_key}(lv{lv}) -> {tkey} "
+            f"failed code={code} msg={ch.get('_message')}"
+        )
+        return out
+
+    out["switched"] = True
+    out["to_key"] = tkey
+    out["to_level"] = _partner_level(target)
+    out["reason"] = f"level={lv}>{max_level} -> key={tkey} level={out['to_level']}"
+    log(
+        f"[+] qmd active switch key={current_key}(lv{lv}) -> "
+        f"key={tkey}(lv{out['to_level']}) (need level<{max_level})"
+    )
+    return out
+
+
 def _claim_one_partner(
     session: GameSession,
     partner: dict,
@@ -580,8 +704,57 @@ def run_qmd(session: GameSession, *, wait_cooldown: bool = True, log=print) -> d
     # (auto already gates on any-ready before calling run_qmd).
     result["ok"] = claimed > 0
 
+    # After intimacy claims, active partner is the last one we switched to / claimed.
+    # If that partner's character level > 90, switch to any partner with level < 90.
+    last_key = None
+    for r in reversed(per):
+        if not isinstance(r, dict) or r.get("skipped"):
+            continue
+        # Prefer rows that actually became active (switch or successful claim).
+        if r.get("change_character") or r.get("ok") or r.get("relation_exp"):
+            last_key = r.get("key")
+            break
+    if last_key is None and per:
+        # Fallback: last non-skipped partner key, else final list order.
+        for r in reversed(per):
+            if isinstance(r, dict) and not r.get("skipped") and r.get("key") is not None:
+                last_key = r.get("key")
+                break
+    if last_key is None and st1.partners:
+        # No claim activity this run: still ensure if a single partner, else leave.
+        if len(st1.partners) == 1:
+            last_key = st1.partners[0].get("key")
+
+    ensure = ensure_active_partner_under_level(
+        session,
+        st1.partners,
+        current_key=last_key,
+        max_level=ACTIVE_LEVEL_MAX,
+        log=log,
+    )
+    result["active_ensure"] = ensure
+    if ensure.get("switched"):
+        # Refresh overview after forced switch.
+        st1 = get_care_status(session, login_wall=login_wall)
+        result["after"]["summary"] = st1.summary()
+        result["after"]["partner"] = _public_partner(st1.partner)
+        result["after"]["partners"] = [_public_partner(p) for p in st1.partners]
+        result["after"]["ready_count"] = st1.ready_count
+        result["after"]["total_count"] = st1.total_count
+        result["after"]["server_ms"] = st1.server_ms
+        result["after"]["active_key"] = ensure.get("to_key")
+        result["after"]["active_level"] = ensure.get("to_level")
+    else:
+        result["after"]["active_key"] = last_key
+        result["after"]["active_level"] = ensure.get("from_level")
+
     log(
         f"[*] qmd done claimed={claimed} skipped={skipped} failed={failed} "
         f"of {st0.total_count}; after: {st1.summary()}"
+        + (
+            f"; active_switch {ensure.get('from_key')}->{ensure.get('to_key')}"
+            if ensure.get("switched")
+            else f"; active_key={last_key} lv={ensure.get('from_level')}"
+        )
     )
     return result

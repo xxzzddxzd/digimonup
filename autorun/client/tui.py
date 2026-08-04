@@ -81,13 +81,29 @@ def build_dashboard(state: RuntimeState) -> Layout:
         sk = sk[:8] + "…" + sk[-6:]
     mobs_total = int(snap.get("mobs_killed") or 0)
     mobs_last = int(snap.get("mobs_killed_last") or 0)
+    loop_total = str(snap.get("loop_total") or "-")
+    # runloop --count N: loop_total is N (mobs target); Loop/击退 share the same counter.
+    mob_target = None
+    try:
+        if loop_total not in ("-", "infinite", "") and ":" not in loop_total:
+            mob_target = int(loop_total)
+    except Exception:
+        mob_target = None
+    if mob_target is not None and mob_target > 0:
+        loop_label = "击退目标"
+        loop_val = f"{mobs_total}/{mob_target}"
+        kill_val = f"共 {mobs_total}/{mob_target}  本轮 {mobs_last}"
+    else:
+        loop_label = "Loop"
+        loop_val = f"{snap['loop_i']}/{loop_total}"
+        kill_val = f"共 {mobs_total}  本轮 {mobs_last}"
     session_rows = [
         ("UID", snap["public_uid"] or "-"),
         ("Server", snap["server_num"] if snap["server_num"] != "" else "-"),
         ("Session", sk),
         ("Runs", f"{snap['runs']}  win={snap['wins']}  fail={snap['fails']}"),
-        ("Loop", f"{snap['loop_i']}/{snap['loop_total']}"),
-        ("击退", f"共 {mobs_total}  本轮 {mobs_last}"),
+        (loop_label, loop_val),
+        ("击退", kill_val),
     ]
     layout["session"].update(Panel(_kv_table(session_rows), title="Session", border_style="cyan"))
 

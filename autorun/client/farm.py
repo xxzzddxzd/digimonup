@@ -86,7 +86,9 @@ class FarmConfig:
     start_stage: int = 23
     start_sector: int = 2
     region: int = 1
-    count: int = 10
+    count: int = 10  # successful battle runs; <=0 means infinite runs
+    # Stop after N successfully killed mobs (0 = no mob limit). Used by runloop --count.
+    max_mobs: int = 0
     min_stage: int = 1
     sleep_sec: float = 0.2
     damage: str = "0"
@@ -271,7 +273,20 @@ class FarmRunner:
             kill_waves = waves
 
         killed_this_run = 0
+        max_mobs = int(self.config.max_mobs or 0)
+        hit_mob_limit = False
         for wave_no, mobs in kill_waves:
+            if max_mobs > 0:
+                already = int(self.state.snapshot().get("mobs_killed") or 0)
+                remain = max_mobs - already
+                if remain <= 0:
+                    hit_mob_limit = True
+                    break
+                if remain < len(mobs):
+                    mobs = list(mobs)[:remain]
+            if not mobs:
+                hit_mob_limit = True
+                break
             self._heartbeat_tick()
             km = self.session.battle_kill_mob(
                 wave=wave_no,
@@ -280,8 +295,7 @@ class FarmRunner:
             )
             kcode = km.get("_code", 0)
             if kcode not in (0, None):
-                if killed_this_run:
-                    self.state.add_mobs_killed(killed_this_run)
+                # Successful prior waves already counted via add_mobs_killed.
                 self.log(f"[-] kill-mob wave={wave_no} code={kcode} msg={km.get('_message')}")
                 return BattleDropResult(
                     ok=False,
@@ -293,12 +307,22 @@ class FarmRunner:
                     raw_end=km,
                 )
             killed_this_run += len(mobs)
+            # Count immediately so max_mobs can stop mid-stage.
+            self.state.add_mobs_killed(len(mobs))
+            mobs_now = int(self.state.snapshot().get("mobs_killed") or 0)
+            if max_mobs > 0:
+                # TUI Loop should track killed-mob progress, not battle runs.
+                self.state.set_progress(mobs_now)
+            if max_mobs > 0 and mobs_now >= max_mobs:
+                hit_mob_limit = True
+                break
 
         if killed_this_run:
-            self.state.add_mobs_killed(killed_this_run)
             self.log(
                 f"[*] mobs this run={killed_this_run} "
                 f"total={self.state.snapshot().get('mobs_killed', killed_this_run)}"
+                + (f"/{max_mobs}" if max_mobs > 0 else "")
+                + (" (limit)" if hit_mob_limit else "")
             )
 
         self._heartbeat_tick()
@@ -446,10 +470,21 @@ class FarmRunner:
             self.log(f"[-] re-auth failed: {exc}")
             return False
 
+    def _mobs_limit_reached(self) -> bool:
+        max_mobs = int(self.config.max_mobs or 0)
+        if max_mobs <= 0:
+            return False
+        return int(self.state.snapshot().get("mobs_killed") or 0) >= max_mobs
+
     def farm(self) -> DropStats:
         target = self.resolve_start_target()
         infinite = self.config.count <= 0
-        count_desc = "infinite" if infinite else str(self.config.count)
+        max_mobs = int(self.config.max_mobs or 0)
+        if max_mobs > 0:
+            # loop_total is the kill target; Loop shows mobs_killed/loop_total
+            count_desc = str(max_mobs)
+        else:
+            count_desc = "infinite" if infinite else str(self.config.count)
         mode = "stay" if self.config.stay else "push"
         if self.config.no_boss:
             mode = f"{mode}+noboss"
@@ -460,7 +495,7 @@ class FarmRunner:
         i = 0
         stay_fail_streak = 0
         try:
-            while infinite or i < self.config.count:
+            while (infinite or i < self.config.count) and not self._mobs_limit_reached():
                 self._heartbeat_tick()
                 try:
                     result = self.run_one_clear(target)
@@ -552,15 +587,23 @@ class FarmRunner:
                     stay_fail_streak = 0
                     i += 1
                     target = self._advance_target(target, result)
-                    self.state.set_progress(i)
+                    mobs_now = int(self.state.snapshot().get("mobs_killed") or 0)
+                    if max_mobs > 0:
+                        self.state.set_progress(mobs_now)
+                        prog = f"mobs {mobs_now}/{max_mobs}"
+                    else:
+                        self.state.set_progress(i)
+                        prog = f"progress {i}" + ("" if infinite else f"/{self.config.count}")
                     self.state.set_target(
                         region=target.region, stage=target.stage, sector=target.sector, repeat=target.repeat
                     )
                     self.log(
-                        f"[*] progress {i}"
-                        + ("" if infinite else f"/{self.config.count}")
+                        f"[*] {prog}"
                         + f" next={target.stage}-{target.sector} repeat={target.repeat}"
                     )
+                    if self._mobs_limit_reached():
+                        self.log(f"[+] mob limit reached: {mobs_now}/{max_mobs}; stop")
+                        break
                 else:
                     if self.config.stay:
                         stay_fail_streak += 1

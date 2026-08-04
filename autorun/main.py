@@ -76,11 +76,12 @@ def cmd_auto() -> int:
 
 
 
-def cmd_runloop(*, no_boss: bool = False, delay: float = 0.0) -> int:
-    """TUI + infinite stay farm on current login frontier.
+def cmd_runloop(*, no_boss: bool = False, delay: float = 0.0, count: int | None = None) -> int:
+    """TUI + stay farm on current login frontier.
 
     no_boss: kill only small-mob waves, fail-end without boss; re-open same stage.
     delay: seconds before each battle/* request (sets REQUEST_DELAY_SEC; default 0).
+    count: stop after N killed mobs; None/0 = infinite.
     """
     from client.apis import battle as battle_api
 
@@ -143,11 +144,14 @@ def cmd_runloop(*, no_boss: bool = False, delay: float = 0.0) -> int:
         login_sector = max(1, int(info.get("_sector") or acc.capture_sector or 1))
         login_region = int(info.get("_region") or acc.capture_region or 1)
         login_repeat = int(info.get("_repeat") or 0)
+        max_mobs = int(count or 0)
+        count_desc = "infinite" if max_mobs <= 0 else f"mobs/{max_mobs}"
         print(
-            f"[*] runloop: TUI + infinite stay on login frontier "
+            f"[*] runloop: TUI + stay on login frontier "
             f"{login_stage}-{login_sector} region={login_region} "
             f"repeat={login_repeat} ui_stage={ui_stage_no(login_stage, login_sector, login_repeat)}"
             f"{' noboss' if no_boss else ''}"
+            f" count={count_desc}"
             f" delay={applied:g}s"
         )
 
@@ -155,7 +159,8 @@ def cmd_runloop(*, no_boss: bool = False, delay: float = 0.0) -> int:
             start_stage=login_stage,
             start_sector=login_sector,
             region=login_region,
-            count=0,  # infinite
+            count=0,  # infinite runs; stop by max_mobs when set
+            max_mobs=max_mobs,  # 0 = no mob limit
             min_stage=1,
             sleep_sec=0.2,
             damage="0",
@@ -215,15 +220,38 @@ def cmd_runloop(*, no_boss: bool = False, delay: float = 0.0) -> int:
 def cmd_zb(
     *,
     batches: int | None = None,
-    total: int = 1000,
+    total: int | None = None,
     count: int | None = None,
     info_only: bool = False,
     filter_grade: int = 0,
     filter_match: int = 0,
 ) -> int:
-    """One-shot 开装备 (default open 1000 items then stop). Furnace care is in auto."""
+    """One-shot 开装备 (default: open all startup ItemTicket stock)."""
+    progress_width = 20
+    progress_open = False
+    progress_total: int | None = None
+
+    def show_progress(opened: int, total_at_start: int) -> None:
+        nonlocal progress_open, progress_total
+        if progress_total is None:
+            progress_total = max(0, int(total_at_start))
+        current = min(max(0, int(opened)), progress_total)
+        filled = (
+            min(progress_width, (current * progress_width) // progress_total)
+            if progress_total > 0
+            else progress_width
+        )
+        bar = ("█" * filled) + ("░" * (progress_width - filled))
+        finished = current >= progress_total
+        print(
+            f"\r开装备｜[{bar}] 已开 {current}/{progress_total}",
+            end="\n" if finished else "",
+            flush=True,
+        )
+        progress_open = not finished
+
     session = _load_session()
-    session.client.log_enabled = True
+    session.client.log_enabled = bool(info_only)
     result: dict = {"ok": False, "mode": "zb"}
 
     try:
@@ -233,29 +261,52 @@ def cmd_zb(
             "public_uid": session.auth_info.get("_publicUid"),
             "server_num": session.auth_info.get("_serverNum"),
         }
-        print(
-            f"[+] login ok uid={result['login']['public_uid']} "
-            f"server={result['login']['server_num']}"
-        )
+        if info_only:
+            print(
+                f"[+] login ok uid={result['login']['public_uid']} "
+                f"server={result['login']['server_num']}"
+            )
         stats = run_zb(
             session,
             batches=0 if info_only else batches,
-            total=None if info_only else int(total),
+            total=None if info_only or total is None else int(total),
             count=count,
             info_only=bool(info_only),
             filter_grade=int(filter_grade),
             filter_match_count=int(filter_match),
-            log=print,
+            log=print if info_only else (lambda _message: None),
+            progress=None if info_only else show_progress,
         )
         result.update(stats)
+        if not info_only and not result.get("ok"):
+            if progress_open:
+                print()
+                progress_open = False
+            spawn = stats.get("spawn") if isinstance(stats, dict) else None
+            runs = spawn.get("runs") if isinstance(spawn, dict) else None
+            last_run = runs[-1] if isinstance(runs, list) and runs else {}
+            code = last_run.get("code") if isinstance(last_run, dict) else None
+            message = last_run.get("message") if isinstance(last_run, dict) else None
+            detail = f"：code={code}" if code is not None else ""
+            if message:
+                detail += f" message={message}"
+            print(f"开装备失败{detail}", file=sys.stderr)
     except Exception as exc:
         result["error"] = str(exc)
-        print(f"[-] zb crashed: {exc}")
-        traceback.print_exc()
+        if progress_open:
+            print()
+            progress_open = False
+        print(f"开装备失败：{exc}", file=sys.stderr)
+        if info_only:
+            traceback.print_exc()
     finally:
+        if progress_open:
+            print()
+            progress_open = False
         dump_path = Path("last_zb.json")
         dump_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[*] wrote {dump_path}")
+        if info_only:
+            print(f"[*] wrote {dump_path}")
 
     return 0 if result.get("ok") else 1
 
@@ -318,6 +369,13 @@ def cmd_fb(alias: str, *, level: int | None = None) -> int:
 
 def cmd_slzt(*, level: int | None = None, times: int | None = None) -> int:
     """Clear Lost Tower quietly; no level/count means advance until Ctrl+C."""
+    progress_width = 20
+
+    def progress_line(floor: int, completed: int, total: int) -> str:
+        filled = min(progress_width, (max(0, completed) * progress_width) // total)
+        bar = ("█" * filled) + ("░" * (progress_width - filled))
+        return f"失落之塔 第 {floor} 层｜[{bar}] {completed}/{total}"
+
     fixed_level = int(level) if level is not None else None
     if fixed_level is not None and fixed_level < 1:
         raise ValueError(f"slzt level must be >= 1, got {fixed_level}")
@@ -338,6 +396,7 @@ def cmd_slzt(*, level: int | None = None, times: int | None = None) -> int:
         "completed": 0,
         "runs": [],
     }
+    progress_open = False
     try:
         session.run_login_pipeline()
         current_level = fixed_level if fixed_level is not None else session.slzt_next_level()
@@ -345,18 +404,36 @@ def cmd_slzt(*, level: int | None = None, times: int | None = None) -> int:
         while run_limit is None or run_index < run_limit:
             if run_index > 0:
                 session.ensure_heartbeat()
+            if show_total:
+                print(
+                    f"\r{progress_line(current_level, run_index, run_limit)}",
+                    end="",
+                    flush=True,
+                )
+                progress_open = True
             run_index += 1
-            count_text = f"{run_index}/{run_limit}" if show_total else str(run_index)
-            print(f"失落之塔 第 {current_level} 层｜第 {count_text} 次")
+            if not show_total:
+                print(f"失落之塔 第 {current_level} 层｜第 {run_index} 次")
             care = session.slzt(level=current_level)
             result["runs"].append(care)
             result["slzt"] = care  # latest run, kept for backward compatibility
             result["completed"] = len(result["runs"])
             if not care.get("ok"):
                 result["error"] = care.get("error") or "slzt_failed"
+                if progress_open:
+                    print()
+                    progress_open = False
                 print(f"失落之塔失败：{result['error']}", file=sys.stderr)
                 return 1
 
+            if show_total:
+                is_last = run_index >= run_limit
+                print(
+                    f"\r{progress_line(current_level, run_index, run_limit)}",
+                    end="\n" if is_last else "",
+                    flush=True,
+                )
+                progress_open = not is_last
             if auto_advance:
                 current_level += 1
 
@@ -364,11 +441,17 @@ def cmd_slzt(*, level: int | None = None, times: int | None = None) -> int:
         result["ok"] = all(bool(run.get("ok")) for run in result["runs"])
         return 0
     except KeyboardInterrupt:
+        if progress_open:
+            print()
+            progress_open = False
         result["cancelled"] = True
         result["completed"] = len(result["runs"])
         result["ok"] = all(bool(run.get("ok")) for run in result["runs"])
         return 130
     except Exception as exc:
+        if progress_open:
+            print()
+            progress_open = False
         result["error"] = str(exc)
         result["trace"] = traceback.format_exc()
         print(f"失落之塔失败：{exc}", file=sys.stderr)
@@ -411,8 +494,8 @@ def main() -> int:
     parser.add_argument(
         "--total",
         type=int,
-        default=1000,
-        help="zb: total items to open then stop (default 1000)",
+        default=None,
+        help="zb: items to open; default reads all remaining ItemTicket stock",
     )
     parser.add_argument(
         "--batches",
@@ -424,12 +507,12 @@ def main() -> int:
         "--count",
         type=int,
         default=None,
-        help="zb: items per batch (default: GameData SpawnCount, e.g. 8 at lv17)",
+        help="runloop: stop after N killed mobs (default: infinite); zb: items per batch",
     )
     parser.add_argument(
         "--info",
         action="store_true",
-        help="zb: only print furnace info + bit cost, no spawn",
+        help="zb: only print furnace info + ItemTicket stock, no spawn",
     )
     parser.add_argument(
         "--filter-grade",
@@ -475,7 +558,11 @@ def main() -> int:
         return cmd_import(args.input)
 
     if args.command == "runloop":
-        return cmd_runloop(no_boss=bool(args.noboss), delay=float(args.delay or 0.0))
+        return cmd_runloop(
+            no_boss=bool(args.noboss),
+            delay=float(args.delay or 0.0),
+            count=args.count,
+        )
     if args.command == "auto":
         return cmd_auto()
     if args.command in ("ts", "mine"):
@@ -499,7 +586,7 @@ def main() -> int:
     if args.command == "zb":
         return cmd_zb(
             batches=args.batches,
-            total=int(args.total if args.total is not None else 1000),
+            total=int(args.total) if args.total is not None else None,
             count=args.count,
             info_only=bool(args.info),
             filter_grade=int(args.filter_grade or 0),
@@ -511,6 +598,7 @@ def main() -> int:
     print("  python3 main.py --input capture.chlsj")
     print("  python3 main.py runloop")
     print("  python3 main.py runloop --noboss")
+    print("  python3 main.py runloop --noboss --count 20")
     print("  python3 main.py auto")
     print("  python3 main.py ts")
     print("  python3 main.py zb")

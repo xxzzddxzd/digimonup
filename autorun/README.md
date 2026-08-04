@@ -26,12 +26,20 @@ python3 main.py --input 你的抓包.chlsj
 | `python3 main.py auto` | 单次维护：肉田 → 训练 → 探查 → 异次元 box → 炉子 → 竞技场 PVP → 亲密点触 → AFK |
 | `python3 main.py pvp` | **竞技场**：常规+赛季，各选战力最低挑战，直到两种票都耗尽 |
 | `python3 main.py ts` | **数码世界 / 探索** Textual 交互 TUI：鼠标点格行走 / 钻头 / 冲锋 / 领里程（`mine` 为别名） |
-| `python3 main.py zb` | **开装备**：spawn-and-sell（默认每批 8）；`--info` 看炉子快照 |
+| `python3 main.py zb` | **开装备**：读取并开完当前装备生成券；`--info` 看炉子快照 |
 | `python3 main.py fb 1` / `fb 2` / `fb 3` | 清一次副本（有通关层优先 sweep；否则 start/end） |
 | `python3 main.py slzt` | 从失落之塔当前进度的下一层持续推进，`Ctrl+C` 停止 |
 | `python3 main.py slzt -l 4 -t 2` | 连续清指定层；`-l` 为层数，`-t` 为次数 |
 
 无参数时打印 help 与示例。需要 `ts` 时请安装依赖：`pip install -r requirements.txt`（含 `textual`）。
+
+`zb` 开始后从 `/api/goods/list` 读取 `ItemTicket`（goods type 50）的当前
+`_value`，默认将它固定为本次尚需开启的总数量。单行动态进度条显示本次已经
+成功开启的数量；显式指定 `--total` 或 `--batches` 时才覆盖默认总数。
+登录、HTTP、批次日志及结果文件提示静默，详细结果仍保存到 `last_zb.json`。
+`zb --info` 保持原有的炉子信息输出。
+正常未命中筛选的批次只发送 `spawn-and-sell`；`item/list` 仅在启动清理、
+筛选命中或服务端返回 `-35004` 需要恢复时调用。
 
 ### 失落之塔 slzt
 
@@ -45,8 +53,8 @@ python3 main.py slzt -l 4 -t 2
 时默认打 1 次，只带 `-t` 时从当前进度向前推进指定次数。多次挑战复用
 同一次登录会话，任意一次失败后停止。
 
-slzt 开打后，终端只显示当前层数和当前次数；指定 `-t` 时显示为
-`当前次数/总次数`。掉落、HTTP、登录、状态码、汇总及结果文件提示均静默，
+slzt 开打后，终端只显示当前层数和当前次数；指定 `-t` 时使用单行动态
+进度条，并显示 `当前次数/总次数`。掉落、HTTP、登录、状态码、汇总及结果文件提示均静默，
 详细结算仍保存在 `last_slzt.json`。1.1.1 实测协议固定使用
 `region=100000`、`stage=1`、`attr=3`；每 10 层只轮换 `sector`：
 `sector=((层数-1)%10)+1`，`repeat` 保留完整层数。

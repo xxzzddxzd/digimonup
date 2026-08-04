@@ -154,6 +154,8 @@ def _run_qmd_checked(session: GameSession, *, log: LogFn) -> dict:
         _raise_if_kick_blob(row.get("relation_exp"), f"relation-exp[{key}]")
         for item in row.get("relation_rewards") or []:
             _raise_if_kick_blob(item, f"relation-reward[{key}]")
+    ensure = care.get("active_ensure") or {}
+    _raise_if_kick_blob(ensure.get("change_character"), "change-character[active-ensure]")
     return care
 
 

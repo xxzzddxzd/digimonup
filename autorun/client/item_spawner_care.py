@@ -1,6 +1,6 @@
 """Item spawner / 装备炉.
 
-- CLI `zb`: open equip only (spawn-and-sell, default total 1000 items)
+- CLI `zb`: open equip only (spawn-and-sell, default all current ItemTicket stock)
 - `run_item_spawner_care`: furnace maintain for auto (info/add-gold/level-up/complete)
 
 GameData (ItemSpawner[level]):
@@ -19,14 +19,17 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .apis import farm as farm_api
 from .apis import item_spawner as sp_api
 from .partner_care import current_server_ms
 from .session import GameSession
 
 LogFn = Callable[[str], None]
+ProgressFn = Callable[[int, int], None]
 
 SESSION_KICK = -19006
 GOODS_GOLD = 0  # E_GOODS_TYPE.Gold — 比特 / bit
+GOODS_ITEM_TICKET = 50  # E_GOODS_TYPE.ItemTicket — 装备生成券
 
 TABLE_PATH = Path(__file__).resolve().parent.parent / "item_spawner_table.json"
 
@@ -190,6 +193,19 @@ def fetch_info(session: GameSession) -> tuple[dict, dict]:
     _raise_if_kick(body, "item-spawner/info")
     sp = spawner_from(body)
     return body, sp
+
+
+def fetch_item_ticket_stock(session: GameSession) -> tuple[dict, int]:
+    """Return live E_GOODS_TYPE.ItemTicket (type 50) stock."""
+    body = farm_api.goods_list(session.client)
+    _raise_if_kick(body, "goods/list[item-ticket]")
+    code = _code(body)
+    if code not in (0, None):
+        raise RuntimeError(f"goods/list[item-ticket] failed code={code}")
+    for item in _list_from(body, "_goodsList"):
+        if _int(item.get("_type", item.get("type")), -1) == GOODS_ITEM_TICKET:
+            return body, max(0, _int(item.get("_value", item.get("value")), 0))
+    return body, 0
 
 
 
@@ -848,18 +864,20 @@ def run_spawn_batches(
     session: GameSession,
     *,
     batches: Optional[int] = None,
-    total: Optional[int] = 1000,
+    total: Optional[int] = None,
     count: Optional[int] = None,
+    item_ticket_start: Optional[int] = None,
     filter_grade: int = 0,
     filter_match_count: int = 0,
     filter_stat_type_list: Optional[list[int]] = None,
     auto_equip: bool = True,
     auto_sell: bool = True,
     log: LogFn = print,
+    progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
     """Open equip via spawn-and-sell.
 
-    Default: open until ``total`` items (1000), per-batch size = table SpawnCount.
+    Default: open all ItemTicket stock present at startup.
     If ``batches`` is set, run that many batches instead (ignores total).
 
     When _isFilterMatched: compare vs equipped; if better equip+sell old, else sell new.
@@ -884,15 +902,28 @@ def run_spawn_batches(
         batch_count = 1
     result["batch_count"] = batch_count
 
-    # batches mode vs total-items mode
+    if item_ticket_start is None:
+        _, item_ticket_start = fetch_item_ticket_stock(session)
+    item_ticket_start = max(0, int(item_ticket_start))
+    result["item_ticket_start"] = item_ticket_start
+
+    # batches mode vs explicit total vs all startup ItemTicket stock
     if batches is not None and int(batches) > 0:
         target_items = int(batches) * batch_count
         max_batches = int(batches)
         mode = "batches"
-    else:
-        target_items = int(total) if total is not None and int(total) > 0 else 1000
+    elif total is not None and int(total) > 0:
+        target_items = int(total)
         max_batches = max(1, (target_items + batch_count - 1) // batch_count)
         mode = "total"
+    else:
+        target_items = item_ticket_start
+        max_batches = (
+            (target_items + batch_count - 1) // batch_count
+            if target_items > 0
+            else 0
+        )
+        mode = "remaining"
     result["mode"] = mode
     result["target_items"] = target_items
     result["batches_requested"] = max_batches
@@ -900,6 +931,14 @@ def run_spawn_batches(
         f"[*] zb plan: mode={mode} target_items={target_items} "
         f"per_batch={batch_count} max_batches={max_batches}"
     )
+    if progress is not None:
+        progress(0, target_items)
+
+    if target_items <= 0:
+        result["after"] = summary
+        result["item_ticket_after"] = item_ticket_start
+        result["ok"] = True
+        return result
 
     equipped: dict[int, dict] | None = None
     if auto_equip or auto_sell:
@@ -1037,6 +1076,8 @@ def run_spawn_batches(
             result["batches_ok"] += 1
             items_ok += this_count
             result["items_ok"] = items_ok
+            if progress is not None:
+                progress(items_ok, target_items)
             log(
                 f"[+] zb spawn ok batch={i + 1} matched={run.get('is_filter_matched')} "
                 f"items={items_ok}/{target_items}"
@@ -1071,32 +1112,6 @@ def run_spawn_batches(
                 except Exception as exc:
                     run["match_error"] = str(exc)
                     log(f"[!] zb match process failed: {exc}")
-            elif auto_sell:
-                # even without filter match, clear any unexpected unequipped leftovers
-                try:
-                    pending = load_pending_bag_items(session)
-                    if pending:
-                        log(f"[*] zb post-spawn unequipped leftovers n={len(pending)}")
-                        actions = process_pending_bag_items(
-                            session,
-                            equipped=equipped,
-                            auto_equip=auto_equip,
-                            auto_sell=auto_sell,
-                            log=log,
-                        )
-                        run["pending_actions"] = {
-                            "equipped_n": len(actions.get("equipped") or []),
-                            "sold_n": len(actions.get("sold") or []),
-                        }
-                        result["equip_actions"].append(actions)
-                        try:
-                            equipped = load_equipped_by_type(session)
-                        except Exception:
-                            pass
-                except SessionKicked:
-                    raise
-                except Exception as exc:
-                    log(f"[!] zb post-spawn pending failed: {exc}")
             if items_ok >= target_items:
                 result["runs"].append(run)
                 log(f"[*] zb done: opened {items_ok} items (target {target_items})")
@@ -1118,6 +1133,10 @@ def run_spawn_batches(
         result["after"] = summarize_spawner(sp2, table=table)
     except Exception as exc:
         result["after_error"] = str(exc)
+    try:
+        _, result["item_ticket_after"] = fetch_item_ticket_stock(session)
+    except Exception as exc:
+        result["item_ticket_after_error"] = str(exc)
 
     result["ok"] = items_ok >= target_items and items_ok > 0
     if items_ok > 0 and items_ok < target_items:
@@ -1312,7 +1331,7 @@ def run_zb(
     session: GameSession,
     *,
     batches: Optional[int] = None,
-    total: Optional[int] = 1000,
+    total: Optional[int] = None,
     count: Optional[int] = None,
     info_only: bool = False,
     filter_grade: int = 0,
@@ -1320,10 +1339,12 @@ def run_zb(
     auto_equip: bool = True,
     auto_sell: bool = True,
     log: LogFn = print,
+    progress: ProgressFn | None = None,
 ) -> dict[str, Any]:
     """CLI zb: open equip only (spawn-and-sell). Furnace care is auto-only.
 
-    Default opens ``total`` items (1000) then stops. Override with ``batches``.
+    Default opens all ItemTicket stock present at startup.
+    Override with ``total`` or ``batches``.
     """
     table = load_spawner_table()
     out: dict[str, Any] = {"ok": False, "mode": "zb"}
@@ -1333,6 +1354,9 @@ def run_zb(
     out["info"] = summary
     out["upgrade_cost_line"] = format_upgrade_cost(summary)
     log(f"[*] zb furnace snapshot: {out['upgrade_cost_line']}")
+    _, item_ticket_start = fetch_item_ticket_stock(session)
+    out["item_ticket_start"] = item_ticket_start
+    log(f"[*] zb item tickets: {item_ticket_start}")
 
     if info_only:
         out["ok"] = True
@@ -1348,11 +1372,13 @@ def run_zb(
         batches=batches,
         total=total,
         count=count,
+        item_ticket_start=item_ticket_start,
         filter_grade=filter_grade,
         filter_match_count=filter_match_count,
         auto_equip=auto_equip,
         auto_sell=auto_sell,
         log=log,
+        progress=progress,
     )
     out["spawn"] = sp_res
     out["ok"] = bool(sp_res.get("ok"))
