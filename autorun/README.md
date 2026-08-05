@@ -28,6 +28,7 @@ python3 main.py --input 你的抓包.chlsj
 | `python3 main.py ts` | **数码世界 / 探索** Textual 交互 TUI：鼠标点格行走 / 钻头 / 冲锋 / 领里程（`mine` 为别名） |
 | `python3 main.py zb` | **开装备**：读取并开完当前装备生成券；`--info` 看炉子快照 |
 | `python3 main.py fb 1` / `fb 2` / `fb 3` | 清一次副本（有通关层优先 sweep；否则 start/end） |
+| `python3 main.py dungeon 6` | 读取副本 6 当前进度，从下一关持续推进到无法继续，并显示每关奖励 |
 | `python3 main.py slzt` | 从失落之塔当前进度的下一层持续推进，`Ctrl+C` 停止 |
 | `python3 main.py slzt -l 4 -t 2` | 连续清指定层；`-l` 为层数，`-t` 为次数 |
 
@@ -40,6 +41,21 @@ python3 main.py --input 你的抓包.chlsj
 `zb --info` 保持原有的炉子信息输出。
 正常未命中筛选的批次只发送 `spawn-and-sell`；`item/list` 仅在启动清理、
 筛选命中或服务端返回 `-35004` 需要恢复时调用。
+
+### 自动推进副本 dungeon 6
+
+```bash
+python3 main.py dungeon 6
+```
+
+启动后先从 `/api/dungeon/list` 读取 key 6 的 `_level`（最高已通关关卡），
+从 `_level+1` 开始逐关推进。1.2.0 实机协议使用 `region=10000`、
+`stage=5`、`sector=1`、`attr=3`，当前关卡放在 `repeat`；每关依次调用
+`dungeon/start`、共享的 `battle/kill-mob`（固定 `wave=0`）和
+`dungeon/end`。终端每关只显示关卡与合并后的奖励，无法继续时正常停止。
+1.2.0 实测第 100 关为有效上限（服务端不存在第 101 关的
+`dungeonTrialInfoLevelMap`），因此通关 100 后不会再误入 101；详细结果写入
+`last_dungeon.json`。
 
 ### 失落之塔 slzt
 

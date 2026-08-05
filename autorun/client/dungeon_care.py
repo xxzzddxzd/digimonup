@@ -92,6 +92,26 @@ SAFETY_MAX_CLEARS_PER_KEY = 20
 
 DEFAULT_KEY_STAGE_PATH = Path(__file__).resolve().parent.parent / "dungeon_key_stage.json"
 
+# 1.2.0 live protocol for the new dungeon whose settlement returns `_key=6`.
+# This is not the old GameData stageKey=10040 route: the client sends the
+# display floor in `_repeat` and uses a dedicated region/stage pair.
+ADVANCING_DUNGEON_CONFIG: dict[int, dict[str, int]] = {
+    6: {
+        "region": 10000,
+        "stage": 5,
+        "sector": 1,
+        "attr": battle_api.ATTR_IN_DUNGEON,
+        # 1.2.0 server has no dungeonTrialInfoLevelMap entry for level 101.
+        "max_level": 100,
+    },
+}
+
+# E_GOODS_TYPE names used by dungeon 6 rewards.
+ADVANCING_DUNGEON_GOODS_NAMES = {
+    250: "背饰经验",
+    251: "背饰特性材料",
+}
+
 
 class SessionKicked(RuntimeError):
     def __init__(self, where: str, *, body: Any = None):
@@ -229,6 +249,58 @@ def pick_sweep_level(progress: dict | None, *, override: int | None = None) -> i
     if level <= 0:
         return None
     return level
+
+
+def advancing_dungeon_progress(
+    session: GameSession,
+    *,
+    key: int,
+) -> dict[str, Any]:
+    """Read live progress and calculate the next floor for an advancing dungeon."""
+    key = int(key)
+    if key not in ADVANCING_DUNGEON_CONFIG:
+        raise ValueError(f"dungeon key={key} does not support auto advance")
+    rows, listed = fetch_dungeon_rows(session)
+    prog = progress_for(rows, key)
+    if not prog:
+        raise RuntimeError(f"dungeon/list missing progress for key={key}")
+    cleared_level = _int(prog.get("_level", prog.get("level")), 0)
+    return {
+        "key": key,
+        "cleared_level": max(0, cleared_level),
+        "next_level": max(1, cleared_level + 1),
+        "max_level": ADVANCING_DUNGEON_CONFIG[key].get("max_level"),
+        "progress": dict(prog),
+        "list_code": _code(listed),
+    }
+
+
+def format_advancing_dungeon_rewards(rewards: Sequence[dict[str, Any]]) -> str:
+    """Aggregate duplicate reward rows into one concise terminal string."""
+    totals: dict[tuple[int, Any], int] = {}
+    order: list[tuple[int, Any]] = []
+    for row in rewards:
+        if not isinstance(row, dict):
+            continue
+        reward_type = _int(row.get("type", row.get("_type")), 0)
+        value = row.get("value", row.get("_value"))
+        count = _int(row.get("count", row.get("_count")), 0)
+        token = (reward_type, value)
+        if token not in totals:
+            totals[token] = 0
+            order.append(token)
+        totals[token] += count
+    if not order:
+        return "无"
+
+    labels: list[str] = []
+    for reward_type, value in order:
+        if reward_type == 1:
+            label = ADVANCING_DUNGEON_GOODS_NAMES.get(_int(value), f"物品 {value}")
+        else:
+            label = f"奖励 {reward_type}:{value}"
+        labels.append(f"{label} ×{totals[(reward_type, value)]}")
+    return "，".join(labels)
 
 
 def summarize_row(row: dict, meta: dict[int, dict] | None = None) -> dict[str, Any]:
@@ -614,6 +686,108 @@ def run_dungeon_clear(
         )
     else:
         log(f"[-] dungeon/end fail code={result['end_code']} msg={result['end_message']}")
+    return result
+
+
+def run_advancing_dungeon_clear(
+    session: GameSession,
+    *,
+    key: int,
+    level: int,
+    log: LogFn = print,
+) -> dict[str, Any]:
+    """Clear one floor using the 1.2.0 live advancing-dungeon protocol."""
+    key = int(key)
+    level = int(level)
+    config = ADVANCING_DUNGEON_CONFIG.get(key)
+    if not config:
+        raise ValueError(f"dungeon key={key} does not support auto advance")
+    if level < 1:
+        raise ValueError(f"dungeon level must be >= 1, got {level}")
+
+    result: dict[str, Any] = {
+        "ok": False,
+        "key": key,
+        "level": level,
+        **config,
+    }
+    start = dungeon_api.dungeon_start(
+        session.client,
+        region=config["region"],
+        stage=config["stage"],
+        sector=config["sector"],
+        level=level,
+        wave=0,
+        state=battle_api.STATE_FORWARD,
+        attr=config["attr"],
+    )
+    _raise_if_kick(start, f"dungeon/start key={key} level={level}")
+    result["start_code"] = _code(start)
+    result["start_message"] = start.get("_message") or start.get("_details")
+    result["raw_start"] = start
+    if result["start_code"] not in (0, None):
+        result["error"] = "dungeon_start_failed"
+        return result
+
+    waves = _extract_spawn_waves(start.get("_spawnMobList") or {})
+    mob_uids = [uid for _wave_no, mobs in waves for uid in mobs]
+    result["waves"] = [(wave_no, len(mobs)) for wave_no, mobs in waves]
+    result["mob_uid_list"] = mob_uids
+    if not mob_uids:
+        result["error"] = "no_spawn_mob_uid"
+        return result
+
+    # Live dungeon 6 sends wave=0 even though the spawn entry is labelled wave 1.
+    kill = battle_api.battle_kill_mob(
+        session.client,
+        wave=0,
+        mob_uid_list=mob_uids,
+        reason=battle_api.REASON_NONE,
+    )
+    _raise_if_kick(kill, f"battle/kill-mob key={key} level={level}")
+    result["kill_code"] = _code(kill)
+    result["kill_message"] = kill.get("_message") or kill.get("_details")
+    result["raw_kill"] = kill
+    if result["kill_code"] not in (0, None):
+        result["error"] = "battle_kill_mob_failed"
+        return result
+
+    end = dungeon_api.dungeon_end(
+        session.client,
+        region=config["region"],
+        reason=battle_api.REASON_CLEAR,
+        state=battle_api.STATE_FORWARD,
+        damage="0",
+        send_damage="0",
+        receive_damage="0",
+        speed=5.0,
+    )
+    _raise_if_kick(end, f"dungeon/end key={key} level={level}")
+    result["end_code"] = _code(end)
+    result["end_message"] = end.get("_message") or end.get("_details")
+    result["raw_end"] = end
+    result["rewards"] = _extract_reward_list(end)
+    result["goods"] = _extract_goods_deltas(end)
+
+    dungeon_after = end.get("_dungeon") if isinstance(end.get("_dungeon"), dict) else {}
+    result["progress_after"] = dict(dungeon_after)
+    result["cleared_level"] = _int(dungeon_after.get("_level"), 0)
+    returned_key = _int(dungeon_after.get("_key"), -1)
+    if result["end_code"] not in (0, None):
+        result["error"] = "dungeon_end_failed"
+        return result
+    if returned_key != key:
+        result["error"] = "unexpected_dungeon_key"
+        return result
+    if result["cleared_level"] < level:
+        result["error"] = "dungeon_progress_not_advanced"
+        return result
+
+    result["ok"] = True
+    log(
+        f"dungeon {key} 第 {level} 关｜奖励："
+        f"{format_advancing_dungeon_rewards(result['rewards'])}"
+    )
     return result
 
 

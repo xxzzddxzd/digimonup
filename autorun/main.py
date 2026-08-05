@@ -17,7 +17,12 @@ from client.farm import FarmConfig, FarmRunner
 from client.promotion_care import build_promotion_snapshot, format_promo_line
 from client.item_spawner_care import run_zb
 from client.pvp_care import run_pvp
-from client.dungeon_care import run_fb, resolve_fb_key
+from client.dungeon_care import (
+    advancing_dungeon_progress,
+    resolve_fb_key,
+    run_advancing_dungeon_clear,
+    run_fb,
+)
 from client.heartbeat import HeartbeatService
 from client.runtime_state import STATE, ui_stage_no
 from client.session import GameSession
@@ -367,6 +372,108 @@ def cmd_fb(alias: str, *, level: int | None = None) -> int:
         print(f"[*] wrote {dump_path}")
 
 
+def cmd_dungeon_advance(*, key: int) -> int:
+    """Advance a live-protocol dungeon from its current cleared floor."""
+    key = int(key)
+    session = _load_session()
+    session.client.log_enabled = False
+    result: dict = {
+        "ok": False,
+        "mode": "dungeon_advance",
+        "key": key,
+        "completed": 0,
+        "runs": [],
+    }
+    try:
+        session.run_login_pipeline()
+        progress = advancing_dungeon_progress(session, key=key)
+        result["progress_before"] = progress
+        cleared_before = int(progress["cleared_level"])
+        current_level = int(progress["next_level"])
+        max_level = progress.get("max_level")
+        max_level = int(max_level) if max_level is not None else None
+        print(
+            f"dungeon {key} 当前已通关第 {progress['cleared_level']} 关｜"
+            f"下一关：第 {current_level} 关"
+        )
+
+        while True:
+            if max_level is not None and current_level > max_level:
+                result["ok"] = True
+                result["stopped_level"] = current_level
+                result["stop_reason"] = "max_level_reached"
+                if cleared_before > max_level:
+                    result["progress_over_max"] = True
+                    print(
+                        f"dungeon {key} 当前记录第 {cleared_before} 关｜无法继续"
+                        f"（1.2.0 有效上限：第 {max_level} 关）"
+                    )
+                else:
+                    print(f"dungeon {key} 已到第 {max_level} 关｜无法继续")
+                return 0
+            if result["runs"]:
+                session.ensure_heartbeat()
+            care = run_advancing_dungeon_clear(
+                session,
+                key=key,
+                level=current_level,
+                log=print,
+            )
+            result["runs"].append(care)
+            result["last_run"] = care
+            if not care.get("ok"):
+                result["stopped_level"] = current_level
+                result["stop_reason"] = care.get("error") or "dungeon_failed"
+                code = care.get("start_code")
+                if code in (0, None):
+                    code = care.get("kill_code")
+                if code in (0, None):
+                    code = care.get("end_code")
+                message = (
+                    care.get("start_message")
+                    or care.get("kill_message")
+                    or care.get("end_message")
+                )
+                terminal_end_limit = (
+                    care.get("error") == "dungeon_end_failed"
+                    and care.get("end_code") == -10001
+                    and "dungeonTrialInfoLevelMap" in str(message)
+                )
+                if care.get("error") == "dungeon_start_failed" or terminal_end_limit:
+                    # A rejected next floor is the normal terminal condition.
+                    result["ok"] = True
+                    print(
+                        f"dungeon {key} 第 {current_level} 关｜无法继续"
+                        f"（code={code}，message={message}）"
+                    )
+                    return 0
+                print(
+                    f"dungeon {key} 第 {current_level} 关｜失败："
+                    f"{result['stop_reason']}（code={code}，message={message}）",
+                    file=sys.stderr,
+                )
+                return 1
+
+            result["completed"] += 1
+            cleared_level = int(care.get("cleared_level") or current_level)
+            current_level = cleared_level + 1
+    except KeyboardInterrupt:
+        result["cancelled"] = True
+        result["ok"] = bool(result["completed"])
+        print("\n已取消")
+        return 130
+    except Exception as exc:
+        result["error"] = str(exc)
+        result["trace"] = traceback.format_exc()
+        print(f"dungeon {key} 失败：{exc}", file=sys.stderr)
+        return 1
+    finally:
+        Path("last_dungeon.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+
 def cmd_slzt(*, level: int | None = None, times: int | None = None) -> int:
     """Clear Lost Tower quietly; no level/count means advance until Ctrl+C."""
     progress_width = 20
@@ -489,7 +596,7 @@ def main() -> int:
         "command",
         nargs="?",
         choices=("runloop", "auto", "ts", "mine", "zb", "pvp", "fb", "dungeon", "slzt"),
-        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场; fb: 副本; slzt: 失落之塔",
+        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场; fb: 副本; dungeon 6: 自动推进新副本; slzt: 失落之塔",
     )
     parser.add_argument(
         "--total",
@@ -530,7 +637,7 @@ def main() -> int:
         "fb_key",
         nargs="?",
         default=None,
-        help="fb: dungeon alias/key (1/2 or fb1/fb2)",
+        help="fb/dungeon: dungeon alias/key; dungeon 6 auto-advances from live progress",
     )
     parser.add_argument(
         "--key",
@@ -580,8 +687,14 @@ def main() -> int:
     if args.command in ("fb", "dungeon"):
         alias = args.fb_key if args.fb_key is not None else (str(args.key) if args.key is not None else None)
         if alias is None:
-            print("[-] fb requires key/alias, e.g. python3 main.py fb 1")
+            print("[-] fb/dungeon requires key/alias, e.g. python3 main.py dungeon 6")
             return 2
+        key = resolve_fb_key(alias)
+        if args.command == "dungeon" and key == 6:
+            if args.level is not None:
+                print("[-] dungeon 6 always starts from live progress; do not specify -l")
+                return 2
+            return cmd_dungeon_advance(key=key)
         return cmd_fb(str(alias), level=args.level)
     if args.command == "zb":
         return cmd_zb(
@@ -610,6 +723,7 @@ def main() -> int:
     print("  python3 main.py fb 1")
     print("  python3 main.py fb 2 --level 56")
     print("  python3 main.py fb 3")
+    print("  python3 main.py dungeon 6")
     print("  python3 main.py slzt")
     print("  python3 main.py slzt -l 4 -t 2")
     return 2
