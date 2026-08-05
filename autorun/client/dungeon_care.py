@@ -17,8 +17,10 @@ FB aliases (user mapping from live runs):
 
 auto dungeon policy:
   1. claim remaining ad tickets by `_adCount`
-  2. burn ticket stock on clearable dungeons
-  3. never battle stageKey 10000 / 10020 (keys 1/2) — ad only
+  2. spend ticket stock by challenging `_level+1` and advancing progress
+  3. if the next start is rejected, sweep the current cleared level with the
+     remaining tickets
+  4. never battle stageKey 10000 / 10020 (keys 1/2) — ad only
 """
 from __future__ import annotations
 
@@ -939,9 +941,11 @@ def run_dungeon_auto_care(
     """auto dungeon flow:
 
     1. claim remaining ads by `_adCount` (all keys, including 10000/10020)
-    2. for dungeons with ticket stock: prefer /api/dungeon/sweep on cleared floors
-       until tickets are gone (fallback battle clear if never cleared)
-    3. stageKey 10000 / 10020 (keys 1/2): ads only, never battle/sweep
+    2. for ordinary dungeons with ticket stock: battle `_level+1` repeatedly
+       so every successful ticket advances the highest cleared floor
+    3. if the next `dungeon/start` is rejected before entering battle, sweep
+       the current highest floor with the remaining tickets
+    4. stageKey 10000 / 10020 (keys 1/2): ads only, never battle/sweep
     """
     result: dict[str, Any] = {
         "ok": True,
@@ -949,7 +953,10 @@ def run_dungeon_auto_care(
         "clears": [],
         "skipped_battle": [],
         "total_clears": 0,
+        "total_advances": 0,
+        "total_sweeps": 0,
         "total_clear_fail": 0,
+        "advance_stops": [],
     }
 
     ad = run_dungeon_ad_care(session, log=log)
@@ -1040,13 +1047,15 @@ def run_dungeon_auto_care(
         )
         clears_done = 0
         fails = 0
+        sweep_only = False
         # re-check stock each clear; also cap for safety
         while clears_done < SAFETY_MAX_CLEARS_PER_KEY:
             goods_map = fetch_goods_map(session)
             stock = ticket_stock_for_key(key, goods_map, meta)
             if stock < cost:
                 break
-            # Route: camp-sweep (guild) / sweep (cleared floor) / battle fallback.
+            # Route: camp-sweep (guild) / advance battle / sweep after a
+            # rejected next start. Never sweep first: sweep cannot raise `_level`.
             rows_now, _ = fetch_dungeon_rows(session)
             prog_now = progress_for(rows_now, key)
             if cost_type in CAMP_SWEEP_COST_TYPES:
@@ -1063,20 +1072,26 @@ def run_dungeon_auto_care(
                 }
             else:
                 sweep_lv = pick_sweep_level(prog_now)
-                if sweep_lv is not None:
+                if sweep_only and sweep_lv is not None:
                     one = run_dungeon_sweep(session, key=key, level=sweep_lv, log=log)
                     entry = {
                         "key": key,
                         "stageKey": stage,
                         "name": name,
-                        "mode": "sweep",
+                        "mode": "sweep_fallback",
                         "ok": bool(one.get("ok")),
                         "level": one.get("level"),
                         "code": one.get("code"),
                         "tickets_before": stock,
                     }
                 else:
-                    one = run_dungeon_clear(session, key=key, log=log)
+                    next_level = pick_level(prog_now)
+                    one = run_dungeon_clear(
+                        session,
+                        key=key,
+                        level=next_level,
+                        log=log,
+                    )
                     entry = {
                         "key": key,
                         "stageKey": stage,
@@ -1088,10 +1103,51 @@ def run_dungeon_auto_care(
                         "end_code": one.get("end_code"),
                         "tickets_before": stock,
                     }
+                    start_rejected = (
+                        not one.get("ok")
+                        and one.get("start_code") not in (0, None)
+                    )
+                    if start_rejected and sweep_lv is not None:
+                        stop = {
+                            "key": key,
+                            "stageKey": stage,
+                            "name": name,
+                            "level": next_level,
+                            "start_code": one.get("start_code"),
+                            "message": (one.get("start") or {}).get("message"),
+                        }
+                        result["advance_stops"].append(stop)
+                        log(
+                            f"[*] dungeon advance stop key={key} level={next_level} "
+                            f"code={one.get('start_code')}; fallback sweep level={sweep_lv}"
+                        )
+                        sweep_only = True
+                        one = run_dungeon_sweep(
+                            session,
+                            key=key,
+                            level=sweep_lv,
+                            log=log,
+                        )
+                        entry = {
+                            "key": key,
+                            "stageKey": stage,
+                            "name": name,
+                            "mode": "sweep_fallback",
+                            "ok": bool(one.get("ok")),
+                            "level": one.get("level"),
+                            "code": one.get("code"),
+                            "tickets_before": stock,
+                            "advance_level": next_level,
+                            "advance_start_code": stop["start_code"],
+                        }
             result["clears"].append(entry)
             if one.get("ok"):
                 clears_done += 1
                 result["total_clears"] += 1
+                if entry.get("mode") == "battle":
+                    result["total_advances"] += 1
+                elif entry.get("mode") == "sweep_fallback":
+                    result["total_sweeps"] += 1
             else:
                 fails += 1
                 result["total_clear_fail"] += 1
@@ -1113,7 +1169,8 @@ def run_dungeon_auto_care(
 
     log(
         f"[*] dungeon-auto summary ad_ok={result['ad'].get('total_ok')} "
-        f"clears={result['total_clears']} clear_fail={result['total_clear_fail']} "
+        f"clears={result['total_clears']} advances={result['total_advances']} "
+        f"sweeps={result['total_sweeps']} clear_fail={result['total_clear_fail']} "
         f"skip_battle={len(result['skipped_battle'])}"
     )
     return result
