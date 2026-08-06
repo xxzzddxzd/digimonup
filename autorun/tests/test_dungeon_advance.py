@@ -9,7 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import main as app
-from client.dungeon_care import run_advancing_dungeon_sweep
+from client.dungeon_care import (
+    advancing_dungeon_progress,
+    run_advancing_dungeon_clear,
+    run_advancing_dungeon_sweep,
+)
 
 
 class FakeSession:
@@ -84,7 +88,7 @@ class DungeonAdvanceTests(unittest.TestCase):
         code, saved = self.run_in_temp(exercise)
         self.assertEqual(code, 0)
         self.assertEqual(clear_levels, [99, 100])
-        self.assertEqual(sweep_calls, [(100, False), (100, True)])
+        self.assertEqual(sweep_calls, [(100, True), (100, True)])
         self.assertEqual(saved["completed"], 4)
         self.assertEqual(saved["stop_reason"], "count_reached")
         self.assertEqual(session.heartbeats, 3)
@@ -240,6 +244,130 @@ class DungeonAdvanceTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "dungeon_trial_reset_failed")
         self.assertEqual(client.calls, [("/api/dungeon/trial-reset", {"_key": 6})])
+
+    def test_dungeon_7_uses_progress_key_7_and_battle_stage_6(self) -> None:
+        client = FakeApiClient(
+            {
+                "/api/dungeon/list": [
+                    {
+                        "_code": 0,
+                        "_dungeonList": {
+                            "_list": [
+                                {
+                                    "_key": 6,
+                                    "_level": 101,
+                                    "_challengeLevel": 101,
+                                },
+                                {
+                                    "_key": 7,
+                                    "_level": 2,
+                                    "_challengeLevel": 2,
+                                },
+                            ]
+                        },
+                    }
+                ],
+                "/api/dungeon/start": [
+                    {
+                        "_code": 0,
+                        "_spawnMobList": {
+                            "_list": [
+                                {
+                                    "_wave": 1,
+                                    "_mobList": {"_list": [{"_uid": "mob-3"}]},
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "/api/battle/kill-mob": [{"_code": 0}],
+                "/api/dungeon/end": [
+                    {
+                        "_code": 0,
+                        "_dungeon": {
+                            "_key": 7,
+                            "_level": 3,
+                            "_challengeLevel": 3,
+                        },
+                        "_rewardAllList": {"_rewardList": {"_list": []}},
+                    }
+                ],
+            }
+        )
+        session = SimpleNamespace(client=client, init_data={})
+
+        progress = advancing_dungeon_progress(session, key=7)
+        clear = run_advancing_dungeon_clear(
+            session,
+            key=7,
+            level=3,
+            log=lambda _line: None,
+        )
+
+        self.assertEqual(progress["progress_key"], 7)
+        self.assertEqual(progress["cleared_level"], 2)
+        self.assertEqual(progress["challenge_level"], 2)
+        self.assertTrue(clear["ok"])
+        self.assertEqual(clear["cleared_level"], 3)
+        self.assertEqual(
+            client.calls[1],
+            (
+                "/api/dungeon/start",
+                {
+                    "_region": 10000,
+                    "_stage": 6,
+                    "_sector": 1,
+                    "_repeat": 3,
+                    "_wave": 0,
+                    "_state": 0,
+                    "_attr": 3,
+                },
+            ),
+        )
+
+    def test_fixed_level_defaults_to_one_run(self) -> None:
+        session = FakeSession()
+        clear_levels: list[int] = []
+
+        def clear(_session, *, key: int, level: int, log):
+            clear_levels.append(level)
+            return {
+                "ok": True,
+                "key": key,
+                "level": level,
+                "cleared_level": level,
+                "progress_after": {"_challengeLevel": level},
+            }
+
+        def exercise(tmp: Path):
+            with (
+                patch.object(app, "_load_session", return_value=session),
+                patch.object(
+                    app,
+                    "advancing_dungeon_progress",
+                    return_value={
+                        "key": 7,
+                        "progress_key": 7,
+                        "cleared_level": 2,
+                        "challenge_level": 2,
+                        "next_level": 3,
+                        "max_level": 100,
+                    },
+                ),
+                patch.object(app, "run_advancing_dungeon_clear", side_effect=clear),
+                patch.object(app, "run_advancing_dungeon_sweep") as sweep,
+                patch("builtins.print"),
+            ):
+                code = app.cmd_dungeon_advance(key=7, level=3)
+            saved = json.loads((tmp / "last_dungeon.json").read_text(encoding="utf-8"))
+            return code, saved, sweep
+
+        code, saved, sweep = self.run_in_temp(exercise)
+        self.assertEqual(code, 0)
+        self.assertEqual(clear_levels, [3])
+        sweep.assert_not_called()
+        self.assertEqual(saved["count"], 1)
+        self.assertEqual(saved["completed"], 1)
 
 
 if __name__ == "__main__":

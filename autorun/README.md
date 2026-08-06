@@ -28,7 +28,7 @@ python3 main.py --input 你的抓包.chlsj
 | `python3 main.py ts` | **数码世界 / 探索** Textual 交互 TUI：鼠标点格行走 / 钻头 / 冲锋 / 领里程（`mine` 为别名） |
 | `python3 main.py zb` | **开装备**：读取并开完当前装备生成券；`--info` 看炉子快照 |
 | `python3 main.py fb 1` / `fb 2` / `fb 3` | 清一次副本（有通关层优先 sweep；否则 start/end） |
-| `python3 main.py dungeon 6 [-c N]` | 推进副本 6；到第 100 关后重复刷，`-c` 限制次数 |
+| `python3 main.py dungeon 7 [-l N] [-c N]` | 推进职业试炼 key 7；`-l` 指定关卡，`-c` 限制次数 |
 | `python3 main.py slzt` | 从失落之塔当前进度的下一层持续推进，`Ctrl+C` 停止 |
 | `python3 main.py slzt -l 4 -t 2` | 连续清指定层；`-l` 为层数，`-t` 为次数 |
 
@@ -42,16 +42,24 @@ python3 main.py --input 你的抓包.chlsj
 正常未命中筛选的批次只发送 `spawn-and-sell`；`item/list` 仅在启动清理、
 筛选命中或服务端返回 `-35004` 需要恢复时调用。
 
-### 自动推进副本 dungeon 6
+### 自动推进职业试炼 dungeon 7
 
 ```bash
-python3 main.py dungeon 6          # 一直刷，Ctrl+C 停止
-python3 main.py dungeon 6 -c 10    # 本次共打 10 次
+python3 main.py dungeon 7              # 从当前进度一直推进，Ctrl+C 停止
+python3 main.py dungeon 7 -c 10        # 从当前进度打 10 次
+python3 main.py dungeon 7 -l 3         # 指定第 3 关，默认只打 1 次
+python3 main.py dungeon 7 -l 100 -c 10 # 指定第 100 关打 10 次
 ```
 
-启动后先从 `/api/dungeon/list` 读取 key 6 的 `_level`（最高已通关关卡），
-从 `_level+1` 开始逐关推进。1.2.0 实机协议使用 `region=10000`、
-`stage=5`、`sector=1`、`attr=3`，当前关卡放在 `repeat`；每关依次调用
+启动后先从 `/api/dungeon/list` 读取 key 7 的 `_level`（历史最高已通关关卡）和
+`_challengeLevel`（本轮重置后的当前进度），未指定 `-l` 时从 `_level+1`
+开始推进。实机确认 CLI `dungeon 7` 对应战斗请求 `_stage=6`，结算返回
+`_dungeon._key=7`；key 6 是相邻的 `_stage=5` 职业试炼，二者进度不能混用。
+`-l N` 指定已解锁关卡：下一未通关关卡走正常战斗，已通关关卡走 sweep；
+只指定 `-l` 默认执行 1 次，配合 `-c` 才重复执行。
+
+正常推进从 `_level+1` 开始逐关推进。1.2.0 实机协议使用 `region=10000`、
+`stage=6`、`sector=1`、`attr=3`，当前关卡放在 `repeat`；每关依次调用
 `dungeon/start`、共享的 `battle/kill-mob`（固定 `wave=0`）和
 `dungeon/end`。终端每关只显示关卡与合并后的奖励。
 1.2.0 实测第 100 关为有效上限（服务端不存在第 101 关的

@@ -93,13 +93,23 @@ SAFETY_MAX_CLEARS_PER_KEY = 20
 
 DEFAULT_KEY_STAGE_PATH = Path(__file__).resolve().parent.parent / "dungeon_key_stage.json"
 
-# 1.2.0 live protocol for the new dungeon whose settlement returns `_key=6`.
-# This is not the old GameData stageKey=10040 route: the client sends the
-# display floor in `_repeat` and uses a dedicated region/stage pair.
+# 1.2.0 live protocol for the Job trial dungeons.  The CLI number follows the
+# server progress `_key`.  Live settlements prove key=6 uses battle stage=5,
+# while key=7 uses stage=6.  These are neighbouring trials and must not share
+# progress.
 ADVANCING_DUNGEON_CONFIG: dict[int, dict[str, int]] = {
     6: {
+        "progress_key": 6,
         "region": 10000,
         "stage": 5,
+        "sector": 1,
+        "attr": battle_api.ATTR_IN_DUNGEON,
+        "max_level": 100,
+    },
+    7: {
+        "progress_key": 7,
+        "region": 10000,
+        "stage": 6,
         "sector": 1,
         "attr": battle_api.ATTR_IN_DUNGEON,
         # 1.2.0 server has no dungeonTrialInfoLevelMap entry for level 101.
@@ -261,18 +271,28 @@ def advancing_dungeon_progress(
     key = int(key)
     if key not in ADVANCING_DUNGEON_CONFIG:
         raise ValueError(f"dungeon key={key} does not support auto advance")
+    config = ADVANCING_DUNGEON_CONFIG[key]
+    progress_key = int(config.get("progress_key", key))
     rows, listed = fetch_dungeon_rows(session)
-    prog = progress_for(rows, key)
+    prog = progress_for(rows, progress_key)
     if not prog:
-        raise RuntimeError(f"dungeon/list missing progress for key={key}")
+        raise RuntimeError(
+            f"dungeon/list missing progress for command={key} progress_key={progress_key}"
+        )
     cleared_level = max(0, _int(prog.get("_level", prog.get("level")), 0))
-    max_level = ADVANCING_DUNGEON_CONFIG[key].get("max_level")
+    challenge_level = max(
+        0,
+        _int(prog.get("_challengeLevel", prog.get("challengeLevel")), 0),
+    )
+    max_level = config.get("max_level")
     next_level = max(1, cleared_level + 1)
     if max_level is not None:
         next_level = min(int(max_level), next_level)
     return {
         "key": key,
+        "progress_key": progress_key,
         "cleared_level": cleared_level,
+        "challenge_level": challenge_level,
         "next_level": next_level,
         "max_level": max_level,
         "at_max_level": max_level is not None and cleared_level >= int(max_level),
@@ -695,6 +715,7 @@ def run_advancing_dungeon_clear(
         "level": level,
         **config,
     }
+    progress_key = int(config.get("progress_key", key))
     start = dungeon_api.dungeon_start(
         session.client,
         region=config["region"],
@@ -760,7 +781,7 @@ def run_advancing_dungeon_clear(
     if result["end_code"] not in (0, None):
         result["error"] = "dungeon_end_failed"
         return result
-    if returned_key != key:
+    if returned_key != progress_key:
         result["error"] = "unexpected_dungeon_key"
         return result
     if result["cleared_level"] < level:
@@ -793,10 +814,17 @@ def run_advancing_dungeon_sweep(
     """
     key = int(key)
     level = int(level)
+    config = ADVANCING_DUNGEON_CONFIG.get(key)
+    if not config:
+        raise ValueError(f"dungeon key={key} does not support auto advance")
+    progress_key = int(config.get("progress_key", key))
     reset: dict[str, Any] | None = None
     if reset_before:
-        reset_body = dungeon_api.dungeon_trial_reset(session.client, key=key)
-        _raise_if_kick(reset_body, f"dungeon/trial-reset key={key}")
+        reset_body = dungeon_api.dungeon_trial_reset(
+            session.client,
+            key=progress_key,
+        )
+        _raise_if_kick(reset_body, f"dungeon/trial-reset key={progress_key}")
         reset = {
             "code": _code(reset_body),
             "message": reset_body.get("_message") or reset_body.get("_details"),
@@ -809,6 +837,7 @@ def run_advancing_dungeon_sweep(
                 "ok": False,
                 "mode": "max_level_sweep",
                 "key": key,
+                "progress_key": progress_key,
                 "level": level,
                 "reset_before": True,
                 "reset": reset,
@@ -819,11 +848,13 @@ def run_advancing_dungeon_sweep(
 
     result = run_dungeon_sweep(
         session,
-        key=key,
+        key=progress_key,
         level=level,
         sector=1,
         log=lambda _line: None,
     )
+    result["key"] = key
+    result["progress_key"] = progress_key
     result["mode"] = "max_level_sweep"
     result["reset_before"] = bool(reset_before)
     result["reset"] = reset
