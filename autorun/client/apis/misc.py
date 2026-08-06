@@ -39,6 +39,11 @@ def camp_info(client: "ApiClient") -> dict:
     return client.post_encrypted("/api/camp/info", {})
 
 
+def camp_attendance(client: "ApiClient") -> dict:
+    """POST /api/camp/attendance (PS_GuildMemberAttendance)."""
+    return client.post_encrypted("/api/camp/attendance", {})
+
+
 def camp_member_list(client: "ApiClient") -> dict:
     return client.post_encrypted("/api/camp/member-list", {})
 
@@ -65,6 +70,10 @@ def boss_damage_info(client: "ApiClient", body: dict | None = None) -> dict:
 
 def boss_damage_reward_list(client: "ApiClient", body: dict | None = None) -> dict:
     return client.post_encrypted("/api/boss-damage/reward-list", body or {})
+
+
+def boss_damage_reward(client: "ApiClient", body: dict | None = None) -> dict:
+    return client.post_encrypted("/api/boss-damage/reward", body or {})
 
 
 def item_spawn_and_sell(client: "ApiClient", body: dict[str, Any] | None = None, **kwargs) -> dict:

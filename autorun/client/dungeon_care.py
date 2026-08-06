@@ -18,8 +18,7 @@ FB aliases (user mapping from live runs):
 auto dungeon policy:
   1. claim remaining ad tickets by `_adCount`
   2. spend ticket stock by challenging `_level+1` and advancing progress
-  3. if the next start is rejected, sweep the current cleared level with the
-     remaining tickets
+  3. if the next start is rejected, stop that dungeon without sweeping
   4. never battle stageKey 10000 / 10020 (keys 1/2) — ad only
 """
 from __future__ import annotations
@@ -266,12 +265,17 @@ def advancing_dungeon_progress(
     prog = progress_for(rows, key)
     if not prog:
         raise RuntimeError(f"dungeon/list missing progress for key={key}")
-    cleared_level = _int(prog.get("_level", prog.get("level")), 0)
+    cleared_level = max(0, _int(prog.get("_level", prog.get("level")), 0))
+    max_level = ADVANCING_DUNGEON_CONFIG[key].get("max_level")
+    next_level = max(1, cleared_level + 1)
+    if max_level is not None:
+        next_level = min(int(max_level), next_level)
     return {
         "key": key,
-        "cleared_level": max(0, cleared_level),
-        "next_level": max(1, cleared_level + 1),
-        "max_level": ADVANCING_DUNGEON_CONFIG[key].get("max_level"),
+        "cleared_level": cleared_level,
+        "next_level": next_level,
+        "max_level": max_level,
+        "at_max_level": max_level is not None and cleared_level >= int(max_level),
         "progress": dict(prog),
         "list_code": _code(listed),
     }
@@ -510,58 +514,36 @@ def run_dungeon_camp_sweep(
     session: GameSession,
     *,
     key: int,
-    level: int | None = None,
-    sector: int = 1,
     log: LogFn = print,
 ) -> dict[str, Any]:
     """Guild dungeon ticket clear via /api/dungeon/camp-sweep.
 
-    Live: key=15/16 level=1 works even when progress `_level=0`.
+    1.2.0 live request: `{_key: 15|16}` only. The endpoint does not use the
+    ordinary dungeon sector/level fields.
     """
     key = int(key)
     meta = load_key_meta()
-    rows, listed = fetch_dungeon_rows(session)
-    prog = progress_for(rows, key)
-    # camp-sweep accepts level=1 with no prior clear
-    use_level = int(level) if level is not None else (pick_sweep_level(prog) or 1)
 
     result: dict[str, Any] = {
         "ok": False,
         "mode": "camp_sweep",
         "key": key,
-        "sector": int(sector),
-        "level": use_level,
         "stageKey": (meta.get(key) or {}).get("stageKey"),
-        "progress_before": summarize_row(prog or {"_key": key}, meta),
-        "list_code": _code(listed) if listed else None,
     }
-    log(
-        f"[*] dungeon camp-sweep key={key} sector={sector} level={use_level} "
-        f"name={(meta.get(key) or {}).get('name')}"
-    )
-    body = dungeon_api.dungeon_camp_sweep(
-        session.client, key=key, sector=int(sector), level=int(use_level)
-    )
+    log(f"[*] dungeon camp-sweep key={key} name={(meta.get(key) or {}).get('name')}")
+    body = dungeon_api.dungeon_camp_sweep(session.client, key=key)
     _raise_if_kick(body, "dungeon/camp-sweep")
     result["code"] = _code(body)
     result["message"] = body.get("_message") or body.get("_details")
     result["raw"] = body
     result["goods"] = _extract_goods_deltas(body)
     result["rewards"] = _extract_reward_list(body)
-    d = body.get("_dungeon") if isinstance(body.get("_dungeon"), dict) else None
-    if d:
-        result["progress_after"] = summarize_row(d, meta)
-    else:
-        rows2, _ = fetch_dungeon_rows(session)
-        result["progress_after"] = summarize_row(
-            progress_for(rows2, key) or {"_key": key}, meta
-        )
+    result["boss_damage"] = body.get("_bossDamage")
     ok = result["code"] in (0, None)
     result["ok"] = ok
     if ok:
         log(
-            f"[+] dungeon/camp-sweep ok key={key} level={use_level} "
-            f"goods={result['goods']}"
+            f"[+] dungeon/camp-sweep ok key={key} goods={result['goods']}"
         )
     else:
         log(
@@ -793,6 +775,66 @@ def run_advancing_dungeon_clear(
     return result
 
 
+def run_advancing_dungeon_sweep(
+    session: GameSession,
+    *,
+    key: int,
+    level: int,
+    reset_before: bool = False,
+    log: LogFn = print,
+) -> dict[str, Any]:
+    """Repeat the maximum floor through optional trial-reset then sweep.
+
+    Once key 6 is cleared, ``dungeon/start`` rejects the same floor with
+    ``-29006``. Live 1.2.0 accepts the already-cleared maximum through the
+    ordinary sweep endpoint and returns the normal floor rewards. After that
+    sweep raises ``_challengeLevel`` to the current level, the next run must
+    consume a Trial reset item through ``dungeon/trial-reset`` first.
+    """
+    key = int(key)
+    level = int(level)
+    reset: dict[str, Any] | None = None
+    if reset_before:
+        reset_body = dungeon_api.dungeon_trial_reset(session.client, key=key)
+        _raise_if_kick(reset_body, f"dungeon/trial-reset key={key}")
+        reset = {
+            "code": _code(reset_body),
+            "message": reset_body.get("_message") or reset_body.get("_details"),
+            "dungeon": reset_body.get("_dungeon"),
+            "goods": _extract_goods_deltas(reset_body),
+            "raw": reset_body,
+        }
+        if reset["code"] not in (0, None):
+            return {
+                "ok": False,
+                "mode": "max_level_sweep",
+                "key": key,
+                "level": level,
+                "reset_before": True,
+                "reset": reset,
+                "code": reset["code"],
+                "message": reset["message"],
+                "error": "dungeon_trial_reset_failed",
+            }
+
+    result = run_dungeon_sweep(
+        session,
+        key=key,
+        level=level,
+        sector=1,
+        log=lambda _line: None,
+    )
+    result["mode"] = "max_level_sweep"
+    result["reset_before"] = bool(reset_before)
+    result["reset"] = reset
+    if result.get("ok"):
+        log(
+            f"dungeon {key} 第 {level} 关｜奖励："
+            f"{format_advancing_dungeon_rewards(result.get('rewards') or [])}"
+        )
+    return result
+
+
 def run_fb(
     session: GameSession,
     *,
@@ -936,6 +978,7 @@ def is_ad_only_dungeon(key: int, stage_key: int | None = None) -> bool:
 def run_dungeon_auto_care(
     session: GameSession,
     *,
+    include_guild: bool = True,
     log: LogFn = print,
 ) -> dict[str, Any]:
     """auto dungeon flow:
@@ -943,9 +986,11 @@ def run_dungeon_auto_care(
     1. claim remaining ads by `_adCount` (all keys, including 10000/10020)
     2. for ordinary dungeons with ticket stock: battle `_level+1` repeatedly
        so every successful ticket advances the highest cleared floor
-    3. if the next `dungeon/start` is rejected before entering battle, sweep
-       the current highest floor with the remaining tickets
+    3. if the next `dungeon/start` is rejected, stop without sweeping
     4. stageKey 10000 / 10020 (keys 1/2): ads only, never battle/sweep
+
+    Set ``include_guild=False`` when ``run_guild_auto_care`` already consumed
+    the live key15/key16 attempts in the same auto run.
     """
     result: dict[str, Any] = {
         "ok": True,
@@ -954,7 +999,6 @@ def run_dungeon_auto_care(
         "skipped_battle": [],
         "total_clears": 0,
         "total_advances": 0,
-        "total_sweeps": 0,
         "total_clear_fail": 0,
         "advance_stops": [],
     }
@@ -1025,6 +1069,22 @@ def run_dungeon_auto_care(
             )
             continue
 
+        if cost_type in CAMP_SWEEP_COST_TYPES and not include_guild:
+            result["skipped_battle"].append(
+                {
+                    "key": key,
+                    "stageKey": stage,
+                    "name": name,
+                    "tickets": stock,
+                    "reason": "handled_by_guild_auto",
+                }
+            )
+            log(
+                f"[*] dungeon skip-burn key={key} tickets={stock} "
+                "reason=handled_by_guild_auto"
+            )
+            continue
+
         if cost_type in NO_SWEEP_COST_TYPES:
             result["skipped_battle"].append(
                 {
@@ -1047,15 +1107,15 @@ def run_dungeon_auto_care(
         )
         clears_done = 0
         fails = 0
-        sweep_only = False
         # re-check stock each clear; also cap for safety
         while clears_done < SAFETY_MAX_CLEARS_PER_KEY:
             goods_map = fetch_goods_map(session)
             stock = ticket_stock_for_key(key, goods_map, meta)
             if stock < cost:
                 break
-            # Route: camp-sweep (guild) / advance battle / sweep after a
-            # rejected next start. Never sweep first: sweep cannot raise `_level`.
+            # Route: camp-sweep for guild dungeons; all ordinary dungeons must
+            # advance by battle. A rejected start stops without spending a
+            # ticket on the already-cleared floor.
             rows_now, _ = fetch_dungeon_rows(session)
             prog_now = progress_for(rows_now, key)
             if cost_type in CAMP_SWEEP_COST_TYPES:
@@ -1066,88 +1126,52 @@ def run_dungeon_auto_care(
                     "name": name,
                     "mode": "camp_sweep",
                     "ok": bool(one.get("ok")),
-                    "level": one.get("level"),
                     "code": one.get("code"),
                     "tickets_before": stock,
                 }
             else:
-                sweep_lv = pick_sweep_level(prog_now)
-                if sweep_only and sweep_lv is not None:
-                    one = run_dungeon_sweep(session, key=key, level=sweep_lv, log=log)
-                    entry = {
+                next_level = pick_level(prog_now)
+                one = run_dungeon_clear(
+                    session,
+                    key=key,
+                    level=next_level,
+                    log=log,
+                )
+                entry = {
+                    "key": key,
+                    "stageKey": stage,
+                    "name": name,
+                    "mode": "battle",
+                    "ok": bool(one.get("ok")),
+                    "level": one.get("level"),
+                    "start_code": one.get("start_code"),
+                    "end_code": one.get("end_code"),
+                    "tickets_before": stock,
+                }
+                start_rejected = (
+                    not one.get("ok")
+                    and one.get("start_code") not in (0, None)
+                )
+                if start_rejected:
+                    stop = {
                         "key": key,
                         "stageKey": stage,
                         "name": name,
-                        "mode": "sweep_fallback",
-                        "ok": bool(one.get("ok")),
-                        "level": one.get("level"),
-                        "code": one.get("code"),
-                        "tickets_before": stock,
-                    }
-                else:
-                    next_level = pick_level(prog_now)
-                    one = run_dungeon_clear(
-                        session,
-                        key=key,
-                        level=next_level,
-                        log=log,
-                    )
-                    entry = {
-                        "key": key,
-                        "stageKey": stage,
-                        "name": name,
-                        "mode": "battle",
-                        "ok": bool(one.get("ok")),
-                        "level": one.get("level"),
+                        "level": next_level,
                         "start_code": one.get("start_code"),
-                        "end_code": one.get("end_code"),
-                        "tickets_before": stock,
+                        "message": (one.get("start") or {}).get("message"),
                     }
-                    start_rejected = (
-                        not one.get("ok")
-                        and one.get("start_code") not in (0, None)
+                    result["advance_stops"].append(stop)
+                    log(
+                        f"[*] dungeon advance stop key={key} level={next_level} "
+                        f"code={one.get('start_code')}; no sweep"
                     )
-                    if start_rejected and sweep_lv is not None:
-                        stop = {
-                            "key": key,
-                            "stageKey": stage,
-                            "name": name,
-                            "level": next_level,
-                            "start_code": one.get("start_code"),
-                            "message": (one.get("start") or {}).get("message"),
-                        }
-                        result["advance_stops"].append(stop)
-                        log(
-                            f"[*] dungeon advance stop key={key} level={next_level} "
-                            f"code={one.get('start_code')}; fallback sweep level={sweep_lv}"
-                        )
-                        sweep_only = True
-                        one = run_dungeon_sweep(
-                            session,
-                            key=key,
-                            level=sweep_lv,
-                            log=log,
-                        )
-                        entry = {
-                            "key": key,
-                            "stageKey": stage,
-                            "name": name,
-                            "mode": "sweep_fallback",
-                            "ok": bool(one.get("ok")),
-                            "level": one.get("level"),
-                            "code": one.get("code"),
-                            "tickets_before": stock,
-                            "advance_level": next_level,
-                            "advance_start_code": stop["start_code"],
-                        }
             result["clears"].append(entry)
             if one.get("ok"):
                 clears_done += 1
                 result["total_clears"] += 1
                 if entry.get("mode") == "battle":
                     result["total_advances"] += 1
-                elif entry.get("mode") == "sweep_fallback":
-                    result["total_sweeps"] += 1
             else:
                 fails += 1
                 result["total_clear_fail"] += 1
@@ -1170,7 +1194,7 @@ def run_dungeon_auto_care(
     log(
         f"[*] dungeon-auto summary ad_ok={result['ad'].get('total_ok')} "
         f"clears={result['total_clears']} advances={result['total_advances']} "
-        f"sweeps={result['total_sweeps']} clear_fail={result['total_clear_fail']} "
+        f"clear_fail={result['total_clear_fail']} "
         f"skip_battle={len(result['skipped_battle'])}"
     )
     return result

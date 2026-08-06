@@ -23,12 +23,12 @@ python3 main.py --input 你的抓包.chlsj
 | --- | --- |
 | `python3 main.py --input FILE` | 从 Charles `.chlsj` / 抓包 JSON 导入账号 |
 | `python3 main.py runloop` | TUI 无限刷当前可打关卡 |
-| `python3 main.py auto` | 单次维护：肉田 → 训练 → 探查 → 异次元 box → 炉子 → 竞技场 PVP → 亲密点触 → AFK |
+| `python3 main.py auto` | 单次维护：肉田 → 公会 → 副本 → 训练 → 探查 → 异次元 box → 炉子 → 竞技场 PVP → 亲密点触 → AFK |
 | `python3 main.py pvp` | **竞技场**：常规+赛季，各选战力最低挑战，直到两种票都耗尽 |
 | `python3 main.py ts` | **数码世界 / 探索** Textual 交互 TUI：鼠标点格行走 / 钻头 / 冲锋 / 领里程（`mine` 为别名） |
 | `python3 main.py zb` | **开装备**：读取并开完当前装备生成券；`--info` 看炉子快照 |
 | `python3 main.py fb 1` / `fb 2` / `fb 3` | 清一次副本（有通关层优先 sweep；否则 start/end） |
-| `python3 main.py dungeon 6` | 读取副本 6 当前进度，从下一关持续推进到无法继续，并显示每关奖励 |
+| `python3 main.py dungeon 6 [-c N]` | 推进副本 6；到第 100 关后重复刷，`-c` 限制次数 |
 | `python3 main.py slzt` | 从失落之塔当前进度的下一层持续推进，`Ctrl+C` 停止 |
 | `python3 main.py slzt -l 4 -t 2` | 连续清指定层；`-l` 为层数，`-t` 为次数 |
 
@@ -45,17 +45,22 @@ python3 main.py --input 你的抓包.chlsj
 ### 自动推进副本 dungeon 6
 
 ```bash
-python3 main.py dungeon 6
+python3 main.py dungeon 6          # 一直刷，Ctrl+C 停止
+python3 main.py dungeon 6 -c 10    # 本次共打 10 次
 ```
 
 启动后先从 `/api/dungeon/list` 读取 key 6 的 `_level`（最高已通关关卡），
 从 `_level+1` 开始逐关推进。1.2.0 实机协议使用 `region=10000`、
 `stage=5`、`sector=1`、`attr=3`，当前关卡放在 `repeat`；每关依次调用
 `dungeon/start`、共享的 `battle/kill-mob`（固定 `wave=0`）和
-`dungeon/end`。终端每关只显示关卡与合并后的奖励，无法继续时正常停止。
+`dungeon/end`。终端每关只显示关卡与合并后的奖励。
 1.2.0 实测第 100 关为有效上限（服务端不存在第 101 关的
-`dungeonTrialInfoLevelMap`），因此通关 100 后不会再误入 101；详细结果写入
-`last_dungeon.json`。
+`dungeonTrialInfoLevelMap`），因此通关 100 后固定重复第 100 关，不再请求
+第 101 关。封顶前使用 `start/kill-mob/end` 推进，封顶后切换到
+`dungeon/sweep` 重复领取第 100 关奖励；当 `_challengeLevel` 已到顶时，先用
+`dungeon/trial-reset` 重置再 sweep（重置道具不足会停止并显示服务端错误）。
+`-c N` 指定本次成功次数；不指定时持续刷到 `Ctrl+C` 或资源不足。详细结果
+写入 `last_dungeon.json`。
 
 ### 失落之塔 slzt
 
@@ -116,14 +121,15 @@ python3 main.py auto
 
 1. 登录
 2. 肉田维护（有广告次数先领种子/浇水器，再浇水收获补种）
-3. 副本：先按 `_adCount` 领广告票；普通副本用门票连续挑战 `_level+1`，每次成功后继续下一关。下一关在 `dungeon/start` 阶段被拒绝时，才扫荡当前最高层以用完剩余门票。**10000/10020（key1/2）仍只领广告、不战斗；Firewall 和公会副本保持原有特殊规则**
-4. 训练 / Lab：有完成项则领取 → 重开同一训练 → 请求大家帮助
-5. 探查数码世界 / Mine：耗尽体力捡特训芯片，可冲锋/钻头，尝试里程奖励
-6. 异次元 box：有红点必处理（可领/单次挂满/被干→召回重上）→ 有额度就挂满（自己1+搜索他人）→ 攻击
-7. 炉子维护（投 bit / 建造，不开放装备）
-8. 竞技场 PVP：常规(356) + 赛季(357) 两种票都打完；各列表选战力最低 → battle
-9. 亲密点触：遍历 **所有伙伴**（各自独立冷却）；就绪的先 `change-character` 再 `relation-exp`；全冷却则跳过，不长等
-10. AFK 领取
+3. 公会：未出席则出席；训练场/道场奖励未领取则领取；读取实时门票 `107/108`，分别按剩余次数执行 `camp-sweep`（请求只传 `_key`）
+4. 副本：先按 `_adCount` 领广告票；普通副本用门票连续挑战 `_level+1`，每次成功后继续下一关。下一关在 `dungeon/start` 阶段被拒绝时直接停止，不再回退扫荡当前最高层。**10000/10020（key1/2）仍只领广告、不战斗；Firewall 保持特殊规则**
+5. 训练 / Lab：有完成项则领取 → 重开同一训练 → 请求大家帮助
+6. 探查数码世界 / Mine：耗尽体力捡特训芯片，可冲锋/钻头，尝试里程奖励
+7. 异次元 box：有红点必处理（可领/单次挂满/被干→召回重上）→ 有额度就挂满（自己1+搜索他人）→ 攻击
+8. 炉子维护（投 bit / 建造，不开放装备）
+9. 竞技场 PVP：常规(356) + 赛季(357) 两种票都打完；各列表选战力最低 → battle
+10. 亲密点触：遍历 **所有伙伴**（各自独立冷却）；就绪的先 `change-character` 再 `relation-exp`；全冷却则跳过，不长等
+11. AFK 领取
 
 结果追加到 `logs/auto.log`。遇会话踢出 `-19006` 会等待后重登并再跑完一轮。
 

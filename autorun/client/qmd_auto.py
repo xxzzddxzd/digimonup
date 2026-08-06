@@ -1,4 +1,4 @@
-"""One-shot maintenance: farm + lab + mine + dbox + furnace + pvp + qmd + afk.
+"""One-shot maintenance: farm + guild + dungeon + lab/mine/dbox + pvp/qmd/afk.
 
 Scheduling is external (crontab hourly). No intimacy-cooldown sleep loop.
 No heartbeat. Session kick (-19006): wait then re-auth and finish once.
@@ -37,6 +37,8 @@ from .dungeon_care import run_dungeon_auto_care
 from .dungeon_care import SessionKicked as DungeonSessionKicked
 from .shop_care import run_shop_daily_buy
 from .shop_care import SessionKicked as ShopSessionKicked
+from .guild_care import run_guild_auto_care
+from .guild_care import SessionKicked as GuildSessionKicked
 
 LogFn = Callable[[str], None]
 
@@ -241,7 +243,8 @@ def run_auto_once(
 ) -> int:
     """Single run (crontab-friendly):
 
-    login -> farm -> shop(daily buys) -> dungeon(ad then burn tickets; skip 10000/10020 battle) -> lab -> mine -> dbox -> furnace -> pvp -> qmd(if ready, else skip) -> afk -> exit
+    login -> farm -> shop -> guild -> dungeon -> lab -> mine -> dbox ->
+    furnace -> pvp -> qmd(if ready, else skip) -> afk -> exit
 
     No long sleep on intimacy cooldown. On -19006: wait 600s, re-login, finish once.
     """
@@ -303,9 +306,34 @@ def run_auto_once(
                 except ShopSessionKicked as sk:
                     raise SessionKicked(sk.where, body=sk.body) from sk
 
+                # guild: attendance + training/dojo rewards + all live attempts
+                try:
+                    guild = run_guild_auto_care(session, log=log)
+                    attendance = guild.get("attendance") or {}
+                    rewards = guild.get("rewards") or {}
+                    sweeps = guild.get("sweeps") or {}
+                    training = sweeps.get("training") or {}
+                    dojo = sweeps.get("dojo") or {}
+                    _append_result_log(
+                        result_path,
+                        result="guild",
+                        detail=(
+                            f"ok={guild.get('ok')} "
+                            f"attendance={attendance.get('claimed')} "
+                            f"training_reward={(rewards.get('training') or {}).get('claimed')} "
+                            f"dojo_reward={(rewards.get('dojo') or {}).get('claimed')} "
+                            f"training={training.get('completed')}/{training.get('remaining_start')} "
+                            f"dojo={dojo.get('completed')}/{dojo.get('remaining_start')} "
+                            f"failed={guild.get('total_failed')}"
+                        ),
+                        log=log,
+                    )
+                except GuildSessionKicked as gk:
+                    raise SessionKicked(gk.where, body=gk.body) from gk
+
                 # dungeon: claim remaining ads, then burn tickets (skip battle 10000/10020)
                 try:
-                    dad = run_dungeon_auto_care(session, log=log)
+                    dad = run_dungeon_auto_care(session, include_guild=False, log=log)
                     ad = dad.get("ad") or {}
                     _append_result_log(
                         result_path,
@@ -314,7 +342,7 @@ def run_auto_once(
                             f"ok={dad.get('ok')} "
                             f"ad_ok={ad.get('total_ok')} ad_fail={ad.get('total_fail')} "
                             f"clears={dad.get('total_clears')} "
-                            f"advances={dad.get('total_advances')} sweeps={dad.get('total_sweeps')} "
+                            f"advances={dad.get('total_advances')} "
                             f"clear_fail={dad.get('total_clear_fail')} "
                             f"skip_battle={len(dad.get('skipped_battle') or [])} "
                             f"ad_keys={ad.get('claimed_keys')}"

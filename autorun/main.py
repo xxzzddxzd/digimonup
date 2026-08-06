@@ -21,6 +21,7 @@ from client.dungeon_care import (
     advancing_dungeon_progress,
     resolve_fb_key,
     run_advancing_dungeon_clear,
+    run_advancing_dungeon_sweep,
     run_fb,
 )
 from client.heartbeat import HeartbeatService
@@ -68,7 +69,7 @@ def cmd_import(input_path: str) -> int:
 
 
 def cmd_auto() -> int:
-    """One-shot: farm + dbox + qmd + afk. Schedule via crontab hourly."""
+    """One-shot account maintenance. Schedule via crontab hourly."""
     session_holder = {"s": None}
 
     def make_session():
@@ -76,7 +77,7 @@ def cmd_auto() -> int:
         session_holder["s"] = s
         return s
 
-    print("[*] auto: one-shot farm/dbox/qmd/afk (crontab hourly; no cooldown sleep)")
+    print("[*] auto: one-shot maintenance including guild (crontab hourly; no cooldown sleep)")
     return run_auto_once(make_session, log=print, http_log=True)
 
 
@@ -372,15 +373,19 @@ def cmd_fb(alias: str, *, level: int | None = None) -> int:
         print(f"[*] wrote {dump_path}")
 
 
-def cmd_dungeon_advance(*, key: int) -> int:
-    """Advance a live-protocol dungeon from its current cleared floor."""
+def cmd_dungeon_advance(*, key: int, count: int | None = None) -> int:
+    """Advance to the live maximum, then repeat that floor until stopped."""
     key = int(key)
+    run_limit = int(count) if count is not None else None
+    if run_limit is not None and run_limit < 1:
+        raise ValueError(f"dungeon count must be >= 1, got {run_limit}")
     session = _load_session()
     session.client.log_enabled = False
     result: dict = {
         "ok": False,
         "mode": "dungeon_advance",
         "key": key,
+        "count": run_limit,
         "completed": 0,
         "runs": [],
     }
@@ -392,33 +397,41 @@ def cmd_dungeon_advance(*, key: int) -> int:
         current_level = int(progress["next_level"])
         max_level = progress.get("max_level")
         max_level = int(max_level) if max_level is not None else None
-        print(
-            f"dungeon {key} 当前已通关第 {progress['cleared_level']} 关｜"
-            f"下一关：第 {current_level} 关"
+        repeat_max = max_level is not None and cleared_before >= max_level
+        progress_payload = progress.get("progress") or {}
+        challenge_level = int(
+            progress_payload.get("_challengeLevel", progress_payload.get("challengeLevel", 0))
+            or 0
         )
+        repeat_needs_reset = bool(
+            repeat_max and max_level is not None and challenge_level >= max_level
+        )
+        if repeat_max:
+            print(f"dungeon {key} 已到第 {max_level} 关｜开始重复刷第 {max_level} 关")
+        else:
+            print(
+                f"dungeon {key} 当前已通关第 {progress['cleared_level']} 关｜"
+                f"下一关：第 {current_level} 关"
+            )
 
         while True:
-            if max_level is not None and current_level > max_level:
-                result["ok"] = True
-                result["stopped_level"] = current_level
-                result["stop_reason"] = "max_level_reached"
-                if cleared_before > max_level:
-                    result["progress_over_max"] = True
-                    print(
-                        f"dungeon {key} 当前记录第 {cleared_before} 关｜无法继续"
-                        f"（1.2.0 有效上限：第 {max_level} 关）"
-                    )
-                else:
-                    print(f"dungeon {key} 已到第 {max_level} 关｜无法继续")
-                return 0
             if result["runs"]:
                 session.ensure_heartbeat()
-            care = run_advancing_dungeon_clear(
-                session,
-                key=key,
-                level=current_level,
-                log=print,
-            )
+            if repeat_max:
+                care = run_advancing_dungeon_sweep(
+                    session,
+                    key=key,
+                    level=current_level,
+                    reset_before=repeat_needs_reset,
+                    log=print,
+                )
+            else:
+                care = run_advancing_dungeon_clear(
+                    session,
+                    key=key,
+                    level=current_level,
+                    log=print,
+                )
             result["runs"].append(care)
             result["last_run"] = care
             if not care.get("ok"):
@@ -429,10 +442,13 @@ def cmd_dungeon_advance(*, key: int) -> int:
                     code = care.get("kill_code")
                 if code in (0, None):
                     code = care.get("end_code")
+                if code in (0, None):
+                    code = care.get("code")
                 message = (
                     care.get("start_message")
                     or care.get("kill_message")
                     or care.get("end_message")
+                    or care.get("message")
                 )
                 terminal_end_limit = (
                     care.get("error") == "dungeon_end_failed"
@@ -455,8 +471,22 @@ def cmd_dungeon_advance(*, key: int) -> int:
                 return 1
 
             result["completed"] += 1
+            if run_limit is not None and result["completed"] >= run_limit:
+                result["ok"] = True
+                result["stopped_level"] = current_level
+                result["stop_reason"] = "count_reached"
+                return 0
             cleared_level = int(care.get("cleared_level") or current_level)
             current_level = cleared_level + 1
+            if max_level is not None:
+                current_level = min(max_level, current_level)
+                entering_repeat = not repeat_max and cleared_level >= max_level
+                repeat_max = cleared_level >= max_level
+                if repeat_max:
+                    # A progression battle reaches the max with challengeLevel
+                    # still below it, so the first sweep needs no reset. Every
+                    # successful sweep after that does.
+                    repeat_needs_reset = not entering_repeat
     except KeyboardInterrupt:
         result["cancelled"] = True
         result["ok"] = bool(result["completed"])
@@ -611,10 +641,14 @@ def main() -> int:
         help="zb: batch times override (if set, ignores --total)",
     )
     parser.add_argument(
+        "-c",
         "--count",
         type=int,
         default=None,
-        help="runloop: stop after N killed mobs (default: infinite); zb: items per batch",
+        help=(
+            "runloop: stop after N killed mobs; zb: items per batch; "
+            "dungeon 6: total successful runs (default: infinite)"
+        ),
     )
     parser.add_argument(
         "--info",
@@ -694,7 +728,10 @@ def main() -> int:
             if args.level is not None:
                 print("[-] dungeon 6 always starts from live progress; do not specify -l")
                 return 2
-            return cmd_dungeon_advance(key=key)
+            if args.count is not None and int(args.count) < 1:
+                print("[-] dungeon 6 requires positive count, e.g. python3 main.py dungeon 6 -c 10")
+                return 2
+            return cmd_dungeon_advance(key=key, count=args.count)
         return cmd_fb(str(alias), level=args.level)
     if args.command == "zb":
         return cmd_zb(
@@ -724,6 +761,7 @@ def main() -> int:
     print("  python3 main.py fb 2 --level 56")
     print("  python3 main.py fb 3")
     print("  python3 main.py dungeon 6")
+    print("  python3 main.py dungeon 6 -c 10")
     print("  python3 main.py slzt")
     print("  python3 main.py slzt -l 4 -t 2")
     return 2

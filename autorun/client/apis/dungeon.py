@@ -8,7 +8,7 @@
 | POST /api/dungeon/start | PS_BattleStart_Dungeon | same as battle/start |
 | POST /api/dungeon/end | PS_BattleEnd_Dungeon | same as battle/end |
 | POST /api/dungeon/sweep | PS_DungeonSweep | `_key`, `_sector`, `_level` |
-| POST /api/dungeon/camp-sweep | (no PS name found; same shape as sweep) | `_key`, `_sector`, `_level` |
+| POST /api/dungeon/camp-sweep | PS_GuildDungeonSweep | `_key` |
 | POST /api/dungeon/ad-view | PS_DungeonADView | `_key` |
 | POST /api/dungeon/trial-reset | PS_DungeonTrialReset | `_key` |
 | POST /api/dungeon/matching | PS_DungeonDefenseMatching | `_key`, `_count` |
@@ -253,21 +253,15 @@ def dungeon_camp_sweep(
     client: "ApiClient",
     *,
     key: int,
-    sector: int = 1,
-    level: int,
 ) -> dict:
-    """POST /api/dungeon/camp-sweep.
+    """POST /api/dungeon/camp-sweep (PS_GuildDungeonSweep).
 
-    No dedicated PS_* class name in the dump; body assumed same as sweep
-    (`_key`, `_sector`, `_level`). Confirm with a live capture if server rejects.
+    1.2.0 live capture and RequestData both show that this endpoint accepts only
+    the guild dungeon key. Adding `_sector`/`_level` makes the server reject it.
     """
     return client.post_encrypted(
         "/api/dungeon/camp-sweep",
-        {
-            "_key": int(key),
-            "_sector": int(sector),
-            "_level": int(level),
-        },
+        {"_key": int(key)},
     )
 
 
