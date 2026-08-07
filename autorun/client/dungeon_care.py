@@ -170,6 +170,35 @@ ADVANCING_DUNGEON_GOODS_NAMES = {
     251: "背饰特性材料",
 }
 
+# Live battle wire for /api/dungeon/start uses GameData.Stage Index + RegionKey,
+# NOT Dungeon.StageKey.  Capture 2026-08-07 key=4 Time Tower:
+#   start region=10000 stage=4 sector=1 repeat=50 wave=0 state=0 attr=3
+#   kill  wave=0 with every spawn UID in one request
+#   end   region=10000 reason=1 state=0 damage=0 sendDamage>0 receive=0 speed=5
+DUNGEON_BATTLE_LAYOUT: dict[int, dict[str, int | str]] = {
+    1: {"region": 10000, "stage": 1, "sector": 1},
+    2: {"region": 10000, "stage": 3, "sector": 1},
+    3: {"region": 10000, "stage": 2, "sector": 1},
+    4: {"region": 10000, "stage": 4, "sector": 1},
+    5: {"region": 10000, "stage": 8, "sector": 1},
+    6: {"region": 10000, "stage": 5, "sector": 1},
+    7: {"region": 10000, "stage": 6, "sector": 1},
+    8: {"region": 10000, "stage": 7, "sector": 1},
+    9: {
+        "region": dungeon_api.LOST_TOWER_REGION,
+        "stage": dungeon_api.LOST_TOWER_STAGE,
+        "sector": 1,
+        "dynamic_sector": "lost_tower",
+    },
+    10: {"region": 20000, "stage": 1, "sector": 1},
+    11: {"region": 10000, "stage": 9, "sector": 1},
+    12: {"region": 10000, "stage": 10, "sector": 1},
+    13: {"region": 10000, "stage": 11, "sector": 1},
+    14: {"region": 20000, "stage": 2, "sector": 1},
+    15: {"region": 30000, "stage": 1, "sector": 1},
+    16: {"region": 30000, "stage": 2, "sector": 1},
+}
+
 
 class SessionKicked(RuntimeError):
     def __init__(self, where: str, *, body: Any = None):
@@ -256,6 +285,25 @@ def stage_key_for(dungeon_key: int, key_stage: dict[int, int] | None = None) -> 
     if int(dungeon_key) not in m:
         raise KeyError(f"no stageKey mapping for dungeon key={dungeon_key}")
     return int(m[int(dungeon_key)])
+
+
+
+def battle_layout_for(dungeon_key: int, *, level: int | None = None) -> dict[str, int]:
+    """Resolve live dungeon/start region/stage/sector for a progress key."""
+    key = int(dungeon_key)
+    layout = DUNGEON_BATTLE_LAYOUT.get(key)
+    if not layout:
+        raise KeyError(f"no battle layout for dungeon key={key}")
+    sector = int(layout.get("sector", 1))
+    if str(layout.get("dynamic_sector") or "") == "lost_tower":
+        floor = int(level) if level is not None else 1
+        _stage, sector = dungeon_api.lost_tower_battle_position(floor)
+    return {
+        "region": int(layout["region"]),
+        "stage": int(layout["stage"]),
+        "sector": sector,
+        "attr": battle_api.ATTR_IN_DUNGEON,
+    }
 
 
 def fetch_dungeon_rows(session: GameSession, *, prefer_list: bool = True) -> tuple[list[dict], dict]:
@@ -686,43 +734,58 @@ def run_dungeon_clear(
     *,
     key: int,
     level: int | None = None,
-    sector: int = 1,
-    region: int = dungeon_api.REGION_DUNGEON,
+    sector: int | None = None,
+    region: int | None = None,
     log: LogFn = print,
 ) -> dict[str, Any]:
-    """One clear: dungeon/start -> kill-mob waves -> dungeon/end(CLEAR)."""
+    """One clear using the live 1.2.2 dungeon battle wire.
+
+    Live capture (key=4 Time Tower, 2026-08-07):
+      dungeon/start  region=10000 stage=Index sector=1 repeat=level wave=0 attr=3
+      battle/kill-mob wave=0 with every spawn UID in one request
+      dungeon/end    region=10000 reason=CLEAR damage=0 sendDamage>0 speed=5
+    """
     key = int(key)
     key_stage = load_key_stage_map()
     meta = load_key_meta()
-    stage = stage_key_for(key, key_stage)
+    stage_key = stage_key_for(key, key_stage)
     rows, listed = fetch_dungeon_rows(session)
     prog = progress_for(rows, key)
     use_level = pick_level(prog, override=level)
+    layout = battle_layout_for(key, level=use_level)
+    use_region = int(region) if region is not None else int(layout["region"])
+    use_stage = int(layout["stage"])
+    use_sector = int(sector) if sector is not None else int(layout["sector"])
+    use_attr = int(layout["attr"])
 
     result: dict[str, Any] = {
         "ok": False,
         "key": key,
-        "stageKey": stage,
-        "sector": int(sector),
+        "stageKey": stage_key,
+        "battle_stage": use_stage,
+        "sector": use_sector,
         "level": use_level,
-        "region": int(region),
+        "region": use_region,
+        "attr": use_attr,
         "progress_before": summarize_row(prog or {"_key": key}, meta),
         "list_code": _code(listed) if listed else None,
     }
     log(
-        f"[*] dungeon clear key={key} stageKey={stage} sector={sector} "
-        f"level(repeat)={use_level} name={(meta.get(key) or {}).get('name')}"
+        f"[*] dungeon clear key={key} stageKey={stage_key} battle="
+        f"region={use_region}/stage={use_stage}/sector={use_sector} "
+        f"level(repeat)={use_level} attr={use_attr} "
+        f"name={(meta.get(key) or {}).get('name')}"
     )
 
     start = dungeon_api.dungeon_start(
         session.client,
-        stage=stage,
-        sector=int(sector),
+        stage=use_stage,
+        sector=use_sector,
         level=use_level,
-        region=int(region),
+        region=use_region,
         wave=0,
         state=battle_api.STATE_FORWARD,
-        attr=battle_api.ATTR_PLAY,
+        attr=use_attr,
     )
     _raise_if_kick(start, "dungeon/start")
     result["start_code"] = _code(start)
@@ -731,49 +794,55 @@ def run_dungeon_clear(
         "message": start.get("_message") or start.get("_details"),
         "battle": start.get("_battle"),
     }
+    result["raw_start"] = start
     if result["start_code"] not in (0, None):
         log(
             f"[-] dungeon/start fail code={result['start_code']} "
             f"msg={result['start']['message']}"
         )
-        result["raw_start"] = start
         return result
 
     waves = _extract_spawn_waves(start.get("_spawnMobList") or {})
+    mob_uids = [uid for _wave_no, mobs in waves for uid in mobs]
     result["waves"] = [(w, len(m)) for w, m in waves]
-    log(f"[+] dungeon/start ok waves={result['waves']}")
+    result["mob_uid_list"] = mob_uids
+    log(f"[+] dungeon/start ok waves={result['waves']} mobs={len(mob_uids)}")
+    if not mob_uids:
+        result["error"] = "no_spawn_mob_uid"
+        return result
 
-    killed = 0
-    for wave_no, mobs in waves:
-        km = battle_api.battle_kill_mob(
-            session.client,
-            wave=wave_no,
-            mob_uid_list=mobs,
-            reason=battle_api.REASON_NONE,
-        )
-        _raise_if_kick(km, f"battle/kill-mob wave={wave_no}")
-        kcode = _code(km)
-        if kcode not in (0, None):
-            result["kill_fail"] = {
-                "wave": wave_no,
-                "code": kcode,
-                "message": km.get("_message") or km.get("_details"),
-            }
-            log(f"[-] kill-mob fail wave={wave_no} code={kcode}")
-            result["raw_kill"] = km
-            return result
-        killed += len(mobs)
-    result["mobs_killed"] = killed
+    # Live client reports every spawn UID in a single kill-mob with wave=0.
+    km = battle_api.battle_kill_mob(
+        session.client,
+        wave=0,
+        mob_uid_list=mob_uids,
+        reason=battle_api.REASON_NONE,
+    )
+    _raise_if_kick(km, "battle/kill-mob")
+    result["kill_code"] = _code(km)
+    result["kill_message"] = km.get("_message") or km.get("_details")
+    result["raw_kill"] = km
+    if result["kill_code"] not in (0, None):
+        result["kill_fail"] = {
+            "wave": 0,
+            "code": result["kill_code"],
+            "message": result["kill_message"],
+        }
+        log(f"[-] kill-mob fail code={result['kill_code']}")
+        return result
+    result["mobs_killed"] = len(mob_uids)
 
     end = dungeon_api.dungeon_end(
         session.client,
-        region=int(region),
+        region=use_region,
         reason=battle_api.REASON_CLEAR,
         state=battle_api.STATE_FORWARD,
         damage="0",
-        send_damage="0",
+        # Live Time Tower sent a large positive sendDamage; zero can still work
+        # for some trial keys, but match the ordinary dungeon capture here.
+        send_damage="34579247",
         receive_damage="0",
-        speed=1.0,
+        speed=5.0,
     )
     _raise_if_kick(end, "dungeon/end")
     result["end_code"] = _code(end)

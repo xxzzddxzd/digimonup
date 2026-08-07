@@ -170,10 +170,10 @@ def dungeon_start(
     """POST /api/dungeon/start  (PS_BattleStart_Dungeon).
 
     Args map to BattleInfoParam / battle start fields:
-      stage  -> _stage   (stageKey)
-      sector -> _sector  (often 1)
+      stage  -> _stage   (GameData.Stage.Index for the dungeon, NOT StageKey)
+      sector -> _sector  (often 1; Lost Tower rotates 1..10)
       level  -> _repeat  (dungeon difficulty level; NOT main-story repeat)
-      region -> _region  (2 Dungeon / 4 Soul / 5 Guild)
+      region -> _region  (live uses Stage.RegionKey, e.g. 10000 / 100000)
     """
     battle_api._battle_delay()
     return client.post_encrypted(
