@@ -93,11 +93,19 @@ SAFETY_MAX_CLEARS_PER_KEY = 20
 
 DEFAULT_KEY_STAGE_PATH = Path(__file__).resolve().parent.parent / "dungeon_key_stage.json"
 
-# 1.2.0 live protocol for the Job trial dungeons.  The CLI number follows the
-# server progress `_key`.  Live settlements prove key=6 uses battle stage=5,
-# while key=7 uses stage=6.  These are neighbouring trials and must not share
-# progress.
-ADVANCING_DUNGEON_CONFIG: dict[int, dict[str, int]] = {
+# Auto-advance / tower targets for dungeon keys 6-12.
+# Battle region/stage come from GameData.Stage for each Dungeon.StageKey:
+#   6 Job1  stageKey 10040 -> region 10000 stage 5
+#   7 Job2  stageKey 10041 -> region 10000 stage 6
+#   8 Job3  stageKey 10042 -> region 10000 stage 7
+#   9 Soul  stageKey 10600 -> region 100000 stage 1 (sector rotates with floor)
+#  10 Arena stageKey 20000 -> region 20000 stage 1
+#  11 FW1   stageKey 10700 -> region 10000 stage 9
+#  12 FW2   stageKey 10701 -> region 10000 stage 10
+# Job trials (6-8) share the same start/kill-mob/end protocol proven live; the
+# others reuse that wire shape with their Stage Index/Region.  Key 9 needs
+# Lost-Tower style sector rotation via dynamic_sector="lost_tower".
+ADVANCING_DUNGEON_CONFIG: dict[int, dict[str, int | str]] = {
     6: {
         "progress_key": 6,
         "region": 10000,
@@ -112,10 +120,48 @@ ADVANCING_DUNGEON_CONFIG: dict[int, dict[str, int]] = {
         "stage": 6,
         "sector": 1,
         "attr": battle_api.ATTR_IN_DUNGEON,
-        # 1.2.0 server has no dungeonTrialInfoLevelMap entry for level 101.
         "max_level": 100,
     },
+    8: {
+        "progress_key": 8,
+        "region": 10000,
+        "stage": 7,
+        "sector": 1,
+        "attr": battle_api.ATTR_IN_DUNGEON,
+        "max_level": 100,
+    },
+    9: {
+        "progress_key": 9,
+        "region": dungeon_api.LOST_TOWER_REGION,
+        "stage": dungeon_api.LOST_TOWER_STAGE,
+        "sector": 1,
+        "attr": battle_api.ATTR_IN_DUNGEON,
+        "dynamic_sector": "lost_tower",
+    },
+    10: {
+        "progress_key": 10,
+        "region": 20000,
+        "stage": 1,
+        "sector": 1,
+        "attr": battle_api.ATTR_IN_DUNGEON,
+    },
+    11: {
+        "progress_key": 11,
+        "region": 10000,
+        "stage": 9,
+        "sector": 1,
+        "attr": battle_api.ATTR_IN_DUNGEON,
+    },
+    12: {
+        "progress_key": 12,
+        "region": 10000,
+        "stage": 10,
+        "sector": 1,
+        "attr": battle_api.ATTR_IN_DUNGEON,
+    },
 }
+# Daily tower selection prefers job trials when present, otherwise any 6-12 key.
+JOB_TRIAL_DUNGEON_KEYS = frozenset((6, 7, 8))
 ROTATING_TRIAL_DUNGEON_KEYS = frozenset(ADVANCING_DUNGEON_CONFIG)
 
 # E_GOODS_TYPE names used by dungeon 6 rewards.
@@ -315,26 +361,49 @@ def _advancing_dungeon_progress_from_rows(
     }
 
 
+def resolve_tower_dungeon_key(play_list: Sequence[int]) -> int:
+    """Pick today's tower target from playList among keys 6-12.
+
+    Job trials (6/7/8) are preferred when any of them appear, because ordinary
+    open content like Firewall often coexists in ``_playList``.  When no job
+    trial is open, fall back to a unique 6-12 candidate, else the first one in
+    server playList order.
+    """
+    active_keys = [
+        key for key in play_list if int(key) in ROTATING_TRIAL_DUNGEON_KEYS
+    ]
+    active_keys = [int(key) for key in dict.fromkeys(active_keys)]
+    if not active_keys:
+        raise RuntimeError(
+            "cannot resolve today's tower dungeon from _playList: "
+            f"playList={list(play_list)}, candidates=[], "
+            f"supported_keys={sorted(ROTATING_TRIAL_DUNGEON_KEYS)}"
+        )
+    job_keys = [key for key in active_keys if key in JOB_TRIAL_DUNGEON_KEYS]
+    if len(job_keys) == 1:
+        return job_keys[0]
+    if len(job_keys) > 1:
+        raise RuntimeError(
+            "cannot resolve today's tower dungeon from _playList: "
+            f"playList={list(play_list)}, job_candidates={job_keys}"
+        )
+    if len(active_keys) == 1:
+        return active_keys[0]
+    # Multiple non-job keys (e.g. firewall lanes): follow server playList order.
+    return active_keys[0]
+
+
 def rotating_trial_progress(session: GameSession) -> dict[str, Any]:
-    """Resolve today's Job trial from dungeon/list._playList and return its progress."""
+    """Resolve today's tower dungeon from dungeon/list._playList and return progress."""
     rows, listed = fetch_dungeon_rows(session)
     play_list = dungeon_api.extract_dungeon_play_list(listed)
     if not play_list:
         play_list = dungeon_api.extract_dungeon_play_list(session.init_data or {})
-    active_keys = [
-        key for key in play_list if key in ROTATING_TRIAL_DUNGEON_KEYS
-    ]
-    # Preserve server order while rejecting an ambiguous or absent rotation.
-    active_keys = list(dict.fromkeys(active_keys))
-    if len(active_keys) != 1:
-        raise RuntimeError(
-            "cannot resolve today's tower dungeon from _playList: "
-            f"playList={play_list}, candidates={active_keys}"
-        )
+    key = resolve_tower_dungeon_key(play_list)
     progress = _advancing_dungeon_progress_from_rows(
         rows,
         listed=listed,
-        key=active_keys[0],
+        key=key,
     )
     progress["play_list"] = play_list
     return progress
@@ -755,15 +824,20 @@ def run_advancing_dungeon_clear(
         **config,
     }
     progress_key = int(config.get("progress_key", key))
+    sector = int(config.get("sector", 1))
+    if str(config.get("dynamic_sector") or "") == "lost_tower":
+        _stage, sector = dungeon_api.lost_tower_battle_position(level)
+        result["stage"] = int(config["stage"])
+        result["sector"] = sector
     start = dungeon_api.dungeon_start(
         session.client,
-        region=config["region"],
-        stage=config["stage"],
-        sector=config["sector"],
+        region=int(config["region"]),
+        stage=int(config["stage"]),
+        sector=sector,
         level=level,
         wave=0,
         state=battle_api.STATE_FORWARD,
-        attr=config["attr"],
+        attr=int(config["attr"]),
     )
     _raise_if_kick(start, f"dungeon/start key={key} level={level}")
     result["start_code"] = _code(start)

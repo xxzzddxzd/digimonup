@@ -10,7 +10,9 @@ from unittest.mock import patch
 
 import main as app
 from client.dungeon_care import (
+    ADVANCING_DUNGEON_CONFIG,
     advancing_dungeon_progress,
+    resolve_tower_dungeon_key,
     rotating_trial_progress,
     run_advancing_dungeon_clear,
     run_advancing_dungeon_sweep,
@@ -353,6 +355,35 @@ class DungeonAdvanceTests(unittest.TestCase):
         self.assertEqual(progress["challenge_level"], 100)
         self.assertEqual(progress["play_list"], [7, 12, 2, 3, 4, 1, 5])
 
+    def test_tower_selects_job3_key8_from_play_list(self) -> None:
+        client = FakeApiClient(
+            {
+                "/api/dungeon/list": [
+                    {
+                        "_code": 0,
+                        "_playList": {"_list": [8, 12, 2, 3, 4, 1, 5]},
+                        "_dungeonList": {
+                            "_list": [
+                                {"_key": 6, "_level": 10, "_challengeLevel": 10},
+                                {"_key": 7, "_level": 20, "_challengeLevel": 20},
+                                {"_key": 8, "_level": 33, "_challengeLevel": 12},
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+        session = SimpleNamespace(client=client, init_data={})
+
+        progress = rotating_trial_progress(session)
+
+        self.assertEqual(progress["key"], 8)
+        self.assertEqual(progress["progress_key"], 8)
+        self.assertEqual(progress["cleared_level"], 33)
+        self.assertEqual(progress["challenge_level"], 12)
+        self.assertEqual(progress["next_level"], 34)
+        self.assertEqual(progress["play_list"], [8, 12, 2, 3, 4, 1, 5])
+
     def test_tower_command_uses_resolved_key_and_level(self) -> None:
         session = FakeSession()
         clear_calls: list[tuple[int, int]] = []
@@ -440,6 +471,23 @@ class DungeonAdvanceTests(unittest.TestCase):
         sweep.assert_not_called()
         self.assertEqual(saved["count"], 1)
         self.assertEqual(saved["completed"], 1)
+
+
+    def test_tower_prefers_job_trial_over_firewall(self) -> None:
+        # Live playList often includes Firewall (11/12) alongside today's Job trial.
+        self.assertEqual(resolve_tower_dungeon_key([11, 6, 3, 2, 4, 1, 5]), 6)
+        self.assertEqual(resolve_tower_dungeon_key([12, 8, 2, 3, 4, 1, 5]), 8)
+
+    def test_tower_falls_back_to_non_job_key_when_no_trial(self) -> None:
+        self.assertEqual(resolve_tower_dungeon_key([11, 3, 2, 4, 1, 5]), 11)
+        self.assertEqual(resolve_tower_dungeon_key([12, 2, 1]), 12)
+
+    def test_advancing_config_covers_keys_6_to_12(self) -> None:
+        self.assertEqual(sorted(ADVANCING_DUNGEON_CONFIG), list(range(6, 13)))
+        self.assertEqual(ADVANCING_DUNGEON_CONFIG[8]["stage"], 7)
+        self.assertEqual(ADVANCING_DUNGEON_CONFIG[9]["region"], 100000)
+        self.assertEqual(ADVANCING_DUNGEON_CONFIG[11]["stage"], 9)
+        self.assertEqual(ADVANCING_DUNGEON_CONFIG[12]["stage"], 10)
 
 
 if __name__ == "__main__":

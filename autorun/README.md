@@ -28,7 +28,7 @@ python3 main.py --input 你的抓包.chlsj
 | `python3 main.py ts` | **数码世界 / 探索** Textual 交互 TUI：鼠标点格行走 / 钻头 / 冲锋 / 领里程（`mine` 为别名） |
 | `python3 main.py zb` | **开装备**：读取并开完当前装备生成券；`--info` 看炉子快照 |
 | `python3 main.py fb 1` / `fb 2` / `fb 3` | 清一次副本（有通关层优先 sweep；否则 start/end） |
-| `python3 main.py dungeon tower [-l N] [-c N]` | 自动识别当天轮换的攻击/防御职业试炼并推进；`-l` 指定关卡，`-c` 限制次数 |
+| `python3 main.py dungeon tower [-l N] [-c N]` | 自动识别当天 playList 中 key 6-12（优先职业试炼）并推进；`-l` 指定关卡，`-c` 限制次数 |
 | `python3 main.py slzt` | 从失落之塔当前进度的下一层持续推进，`Ctrl+C` 停止 |
 | `python3 main.py slzt -l 4 -t 2` | 连续清指定层；`-l` 为层数，`-t` 为次数 |
 
@@ -51,15 +51,17 @@ python3 main.py dungeon tower -l 3         # 指定第 3 关，默认只打 1 �
 python3 main.py dungeon tower -l 100 -c 10 # 指定第 100 关打 10 次
 ```
 
-启动后从 `/api/dungeon/list._playList` 中动态选择当天开放的职业试炼：
-key 6 使用 `_stage=5`，key 7 使用 `_stage=6`。随后读取所选 key 自己的
+启动后从 `/api/dungeon/list._playList` 中动态选择当天开放的 key 6-12：
+优先职业试炼 key 6/7/8（`_stage=5/6/7`）；没有试炼时再回退到 9/10/11/12
+（失落之塔 / 竞技场 / 防火墙）。随后读取所选 key 自己的
 `_level`（历史最高已通关关卡）和 `_challengeLevel`（本轮重置后的当前进度），
-未指定 `-l` 时从 `_level+1` 开始推进，两个轮换副本的进度不会混用。
+未指定 `-l` 时从 `_level+1` 开始推进，各 key 进度不会混用。
 `-l N` 指定已解锁关卡：下一未通关关卡走正常战斗，已通关关卡走 sweep；
 只指定 `-l` 默认执行 1 次，配合 `-c` 才重复执行。
 
-正常推进从 `_level+1` 开始逐关推进。1.2.0 实机协议使用 `region=10000`、
-`stage=5|6`、`sector=1`、`attr=3`，当前关卡放在 `repeat`；每关依次调用
+正常推进从 `_level+1` 开始逐关推进。职业试炼实机协议使用 `region=10000`、
+`stage=5|6|7`、`sector=1`、`attr=3`；key 9 用失落之塔 sector 轮换，key 11/12 用 stage 9/10。
+当前关卡放在 `repeat`；每关依次调用
 `dungeon/start`、共享的 `battle/kill-mob`（固定 `wave=0`）和
 `dungeon/end`。终端每关只显示关卡与合并后的奖励。
 1.2.0 实测第 100 关为有效上限（服务端不存在第 101 关的
