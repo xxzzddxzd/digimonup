@@ -12,6 +12,8 @@ from . import (
     mine,
     misc,
     partner,
+    rune,
+    soul,
     shop,
 )
 
@@ -29,5 +31,7 @@ __all__ = [
     "mine",
     "misc",
     "partner",
+    "rune",
+    "soul",
     "shop",
 ]

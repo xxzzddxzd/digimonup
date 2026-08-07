@@ -21,6 +21,7 @@ from client.dungeon_care import (
     ADVANCING_DUNGEON_CONFIG,
     advancing_dungeon_progress,
     resolve_fb_key,
+    rotating_trial_progress,
     run_advancing_dungeon_clear,
     run_advancing_dungeon_sweep,
     run_fb,
@@ -376,12 +377,14 @@ def cmd_fb(alias: str, *, level: int | None = None) -> int:
 
 def cmd_dungeon_advance(
     *,
-    key: int,
+    key: int | str,
     count: int | None = None,
     level: int | None = None,
 ) -> int:
     """Advance from live progress, or clear/sweep one explicitly selected floor."""
-    key = int(key)
+    requested_key = str(key).strip().lower()
+    tower_mode = requested_key == "tower"
+    resolved_key = None if tower_mode else int(key)
     fixed_level = int(level) if level is not None else None
     # A fixed floor defaults to one run.  Repeating it requires an explicit
     # count because subsequent sweeps may consume Trial reset tickets.
@@ -395,7 +398,8 @@ def cmd_dungeon_advance(
     result: dict = {
         "ok": False,
         "mode": "dungeon_advance",
-        "key": key,
+        "requested_key": requested_key,
+        "key": resolved_key,
         "count": run_limit,
         "level": fixed_level,
         "completed": 0,
@@ -403,7 +407,15 @@ def cmd_dungeon_advance(
     }
     try:
         session.run_login_pipeline()
-        progress = advancing_dungeon_progress(session, key=key)
+        if tower_mode:
+            progress = rotating_trial_progress(session)
+            resolved_key = int(progress["key"])
+            result["key"] = resolved_key
+            result["play_list"] = progress.get("play_list")
+        else:
+            progress = advancing_dungeon_progress(session, key=int(resolved_key))
+        key = int(resolved_key)
+        dungeon_label = f"dungeon tower（今日 key {key}）" if tower_mode else f"dungeon {key}"
         result["progress_before"] = progress
         cleared_before = int(progress["cleared_level"])
         current_level = int(progress["next_level"])
@@ -424,7 +436,7 @@ def cmd_dungeon_advance(
             if max_level is not None and fixed_level > max_level:
                 result["stop_reason"] = "level_above_max"
                 print(
-                    f"dungeon {key} 指定第 {fixed_level} 关无效｜"
+                    f"{dungeon_label} 指定第 {fixed_level} 关无效｜"
                     f"最高可指定第 {max_level} 关",
                     file=sys.stderr,
                 )
@@ -432,7 +444,7 @@ def cmd_dungeon_advance(
             if fixed_level > cleared_before + 1:
                 result["stop_reason"] = "level_not_unlocked"
                 print(
-                    f"dungeon {key} 指定第 {fixed_level} 关尚未解锁｜"
+                    f"{dungeon_label} 指定第 {fixed_level} 关尚未解锁｜"
                     f"当前只能打第 {cleared_before + 1} 关",
                     file=sys.stderr,
                 )
@@ -447,14 +459,14 @@ def cmd_dungeon_advance(
         if fixed_level is not None:
             action = "扫荡" if sweep_mode else "挑战"
             print(
-                f"dungeon {key} 当前已通关第 {cleared_before} 关｜"
+                f"{dungeon_label} 当前已通关第 {cleared_before} 关｜"
                 f"指定{action}第 {fixed_level} 关"
             )
         elif sweep_mode:
-            print(f"dungeon {key} 已到第 {max_level} 关｜开始重复刷第 {max_level} 关")
+            print(f"{dungeon_label} 已到第 {max_level} 关｜开始重复刷第 {max_level} 关")
         else:
             print(
-                f"dungeon {key} 当前已通关第 {progress['cleared_level']} 关｜"
+                f"{dungeon_label} 当前已通关第 {progress['cleared_level']} 关｜"
                 f"下一关：第 {current_level} 关"
             )
 
@@ -503,12 +515,12 @@ def cmd_dungeon_advance(
                     # A rejected next floor is the normal terminal condition.
                     result["ok"] = True
                     print(
-                        f"dungeon {key} 第 {current_level} 关｜无法继续"
+                        f"{dungeon_label} 第 {current_level} 关｜无法继续"
                         f"（code={code}，message={message}）"
                     )
                     return 0
                 print(
-                    f"dungeon {key} 第 {current_level} 关｜失败："
+                    f"{dungeon_label} 第 {current_level} 关｜失败："
                     f"{result['stop_reason']}（code={code}，message={message}）",
                     file=sys.stderr,
                 )
@@ -553,7 +565,8 @@ def cmd_dungeon_advance(
     except Exception as exc:
         result["error"] = str(exc)
         result["trace"] = traceback.format_exc()
-        print(f"dungeon {key} 失败：{exc}", file=sys.stderr)
+        label = "dungeon tower" if tower_mode else f"dungeon {resolved_key}"
+        print(f"{label} 失败：{exc}", file=sys.stderr)
         return 1
     finally:
         Path("last_dungeon.json").write_text(
@@ -684,7 +697,7 @@ def main() -> int:
         "command",
         nargs="?",
         choices=("runloop", "auto", "ts", "mine", "zb", "pvp", "fb", "dungeon", "slzt"),
-        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场; fb: 副本; dungeon 7: 自动推进职业试炼; slzt: 失落之塔",
+        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场; fb: 副本; dungeon tower: 自动推进今日职业试炼; slzt: 失落之塔",
     )
     parser.add_argument(
         "--total",
@@ -705,7 +718,7 @@ def main() -> int:
         default=None,
         help=(
             "runloop: stop after N killed mobs; zb: items per batch; "
-            "dungeon 6/7: total successful runs (default: infinite)"
+            "dungeon tower: total successful runs (default: infinite)"
         ),
     )
     parser.add_argument(
@@ -729,7 +742,7 @@ def main() -> int:
         "fb_key",
         nargs="?",
         default=None,
-        help="fb/dungeon: dungeon alias/key; trial dungeon 6/7 auto-advances from live progress",
+        help="fb/dungeon: dungeon alias/key; tower dynamically selects today's trial",
     )
     parser.add_argument(
         "--key",
@@ -742,7 +755,7 @@ def main() -> int:
         "--level",
         type=int,
         default=None,
-        help="slzt or dungeon 6/7: fixed floor; omit to advance from current progress",
+        help="slzt or dungeon tower: fixed floor; omit to advance from current progress",
     )
     parser.add_argument(
         "-t",
@@ -779,10 +792,13 @@ def main() -> int:
     if args.command in ("fb", "dungeon"):
         alias = args.fb_key if args.fb_key is not None else (str(args.key) if args.key is not None else None)
         if alias is None:
-            print("[-] fb/dungeon requires key/alias, e.g. python3 main.py dungeon 6")
+            print("[-] fb/dungeon requires key/alias, e.g. python3 main.py dungeon tower")
             return 2
-        key = resolve_fb_key(alias)
-        if args.command == "dungeon" and key in ADVANCING_DUNGEON_CONFIG:
+        tower_mode = args.command == "dungeon" and str(alias).strip().lower() == "tower"
+        key = "tower" if tower_mode else resolve_fb_key(alias)
+        if args.command == "dungeon" and (
+            tower_mode or key in ADVANCING_DUNGEON_CONFIG
+        ):
             if args.count is not None and int(args.count) < 1:
                 print(
                     f"[-] dungeon {key} requires positive count, "
@@ -828,10 +844,9 @@ def main() -> int:
     print("  python3 main.py fb 1")
     print("  python3 main.py fb 2 --level 56")
     print("  python3 main.py fb 3")
-    print("  python3 main.py dungeon 6")
-    print("  python3 main.py dungeon 7")
-    print("  python3 main.py dungeon 7 -l 3")
-    print("  python3 main.py dungeon 7 -l 100 -c 10")
+    print("  python3 main.py dungeon tower")
+    print("  python3 main.py dungeon tower -l 3")
+    print("  python3 main.py dungeon tower -l 100 -c 10")
     print("  python3 main.py slzt")
     print("  python3 main.py slzt -l 4 -t 2")
     return 2

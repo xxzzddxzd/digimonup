@@ -364,6 +364,41 @@ def extract_dungeon_list(init_or_list_response: dict) -> list[dict]:
     return []
 
 
+def extract_dungeon_play_list(init_or_list_response: dict) -> list[int]:
+    """Pull today's enabled dungeon keys from init-data or dungeon/list."""
+    if not isinstance(init_or_list_response, dict):
+        return []
+
+    play_list = init_or_list_response.get("_playList")
+    if isinstance(play_list, dict):
+        play_list = play_list.get("_list") or []
+    if isinstance(play_list, list):
+        result: list[int] = []
+        for value in play_list:
+            try:
+                result.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    # init-data envelope: {_initData: {_list: [{_type:8,_data:{...}}, ...]}}
+    init = init_or_list_response.get("_initData") or init_or_list_response
+    items = init.get("_list") if isinstance(init, dict) else None
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_type = int(item.get("_type") or -1)
+            except (TypeError, ValueError):
+                continue
+            if item_type != 8:
+                continue
+            data = item.get("_data") or {}
+            return extract_dungeon_play_list(data if isinstance(data, dict) else {})
+    return []
+
+
 def find_dungeon_progress(rows: Sequence[dict], key: int) -> dict | None:
     """Return the progress row for dungeon `_key`, or None."""
     for row in rows:

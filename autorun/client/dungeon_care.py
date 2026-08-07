@@ -116,6 +116,7 @@ ADVANCING_DUNGEON_CONFIG: dict[int, dict[str, int]] = {
         "max_level": 100,
     },
 }
+ROTATING_TRIAL_DUNGEON_KEYS = frozenset(ADVANCING_DUNGEON_CONFIG)
 
 # E_GOODS_TYPE names used by dungeon 6 rewards.
 ADVANCING_DUNGEON_GOODS_NAMES = {
@@ -271,9 +272,22 @@ def advancing_dungeon_progress(
     key = int(key)
     if key not in ADVANCING_DUNGEON_CONFIG:
         raise ValueError(f"dungeon key={key} does not support auto advance")
+    rows, listed = fetch_dungeon_rows(session)
+    return _advancing_dungeon_progress_from_rows(rows, listed=listed, key=key)
+
+
+def _advancing_dungeon_progress_from_rows(
+    rows: Sequence[dict],
+    *,
+    listed: dict,
+    key: int,
+) -> dict[str, Any]:
+    """Calculate advancing progress from an already-fetched dungeon snapshot."""
+    key = int(key)
+    if key not in ADVANCING_DUNGEON_CONFIG:
+        raise ValueError(f"dungeon key={key} does not support auto advance")
     config = ADVANCING_DUNGEON_CONFIG[key]
     progress_key = int(config.get("progress_key", key))
-    rows, listed = fetch_dungeon_rows(session)
     prog = progress_for(rows, progress_key)
     if not prog:
         raise RuntimeError(
@@ -299,6 +313,31 @@ def advancing_dungeon_progress(
         "progress": dict(prog),
         "list_code": _code(listed),
     }
+
+
+def rotating_trial_progress(session: GameSession) -> dict[str, Any]:
+    """Resolve today's Job trial from dungeon/list._playList and return its progress."""
+    rows, listed = fetch_dungeon_rows(session)
+    play_list = dungeon_api.extract_dungeon_play_list(listed)
+    if not play_list:
+        play_list = dungeon_api.extract_dungeon_play_list(session.init_data or {})
+    active_keys = [
+        key for key in play_list if key in ROTATING_TRIAL_DUNGEON_KEYS
+    ]
+    # Preserve server order while rejecting an ambiguous or absent rotation.
+    active_keys = list(dict.fromkeys(active_keys))
+    if len(active_keys) != 1:
+        raise RuntimeError(
+            "cannot resolve today's tower dungeon from _playList: "
+            f"playList={play_list}, candidates={active_keys}"
+        )
+    progress = _advancing_dungeon_progress_from_rows(
+        rows,
+        listed=listed,
+        key=active_keys[0],
+    )
+    progress["play_list"] = play_list
+    return progress
 
 
 def format_advancing_dungeon_rewards(rewards: Sequence[dict[str, Any]]) -> str:

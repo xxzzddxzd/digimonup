@@ -8,7 +8,8 @@ if TYPE_CHECKING:
 
 
 def rune_list(client: "ApiClient") -> dict:
-    return client.post_encrypted("/api/rune/list", {})
+    """Compatibility wrapper for the first cursor page."""
+    return client.post_encrypted("/api/rune/list", {"_cursor": ""})
 
 
 def preset_equip_list(client: "ApiClient") -> dict:
@@ -16,7 +17,8 @@ def preset_equip_list(client: "ApiClient") -> dict:
 
 
 def soul_list(client: "ApiClient") -> dict:
-    return client.post_encrypted("/api/soul/list", {})
+    """Compatibility wrapper for the first cursor page."""
+    return client.post_encrypted("/api/soul/list", {"_cursor": ""})
 
 
 def soul_equip_list(client: "ApiClient") -> dict:

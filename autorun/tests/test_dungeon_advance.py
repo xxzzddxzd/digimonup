@@ -11,6 +11,7 @@ from unittest.mock import patch
 import main as app
 from client.dungeon_care import (
     advancing_dungeon_progress,
+    rotating_trial_progress,
     run_advancing_dungeon_clear,
     run_advancing_dungeon_sweep,
 )
@@ -324,6 +325,77 @@ class DungeonAdvanceTests(unittest.TestCase):
                 },
             ),
         )
+
+    def test_tower_selects_todays_trial_from_play_list(self) -> None:
+        client = FakeApiClient(
+            {
+                "/api/dungeon/list": [
+                    {
+                        "_code": 0,
+                        "_playList": {"_list": [7, 12, 2, 3, 4, 1, 5]},
+                        "_dungeonList": {
+                            "_list": [
+                                {"_key": 6, "_level": 101, "_challengeLevel": 101},
+                                {"_key": 7, "_level": 100, "_challengeLevel": 100},
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+        session = SimpleNamespace(client=client, init_data={})
+
+        progress = rotating_trial_progress(session)
+
+        self.assertEqual(progress["key"], 7)
+        self.assertEqual(progress["progress_key"], 7)
+        self.assertEqual(progress["cleared_level"], 100)
+        self.assertEqual(progress["challenge_level"], 100)
+        self.assertEqual(progress["play_list"], [7, 12, 2, 3, 4, 1, 5])
+
+    def test_tower_command_uses_resolved_key_and_level(self) -> None:
+        session = FakeSession()
+        clear_calls: list[tuple[int, int]] = []
+
+        def clear(_session, *, key: int, level: int, log):
+            clear_calls.append((key, level))
+            return {
+                "ok": True,
+                "key": key,
+                "level": level,
+                "cleared_level": level,
+                "progress_after": {"_challengeLevel": level},
+            }
+
+        def exercise(tmp: Path):
+            with (
+                patch.object(app, "_load_session", return_value=session),
+                patch.object(
+                    app,
+                    "rotating_trial_progress",
+                    return_value={
+                        "key": 6,
+                        "progress_key": 6,
+                        "cleared_level": 4,
+                        "challenge_level": 4,
+                        "next_level": 5,
+                        "max_level": 100,
+                        "play_list": [6, 12, 2, 3, 4, 1, 5],
+                    },
+                ),
+                patch.object(app, "run_advancing_dungeon_clear", side_effect=clear),
+                patch("builtins.print"),
+            ):
+                code = app.cmd_dungeon_advance(key="tower", count=1)
+            saved = json.loads((tmp / "last_dungeon.json").read_text(encoding="utf-8"))
+            return code, saved
+
+        code, saved = self.run_in_temp(exercise)
+        self.assertEqual(code, 0)
+        self.assertEqual(clear_calls, [(6, 5)])
+        self.assertEqual(saved["requested_key"], "tower")
+        self.assertEqual(saved["key"], 6)
+        self.assertEqual(saved["progress_before"]["cleared_level"], 4)
 
     def test_fixed_level_defaults_to_one_run(self) -> None:
         session = FakeSession()

@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .apis import account, battle, dungeon, misc
+from .apis import account, battle, dungeon, misc, rune, soul
 from .config import ClientConfig
 from .crypto import build_encrypted_key, generate_hex_iv, generate_hex_key
 from .drops import reward_label
@@ -390,6 +390,42 @@ class GameSession:
         except (TypeError, ValueError):
             cleared_level = 0
         return max(1, cleared_level + 1)
+
+    def rune_list_all(self) -> list[dict]:
+        """Fetch the complete cursor-paginated rune inventory."""
+        return rune.rune_list_all(self.client)
+
+    def rune_level_up(
+        self,
+        *,
+        rune_uid: str,
+        ingredients_uids: list[str],
+        page_size: int = rune.REINFORCE_PAGE_SIZE,
+    ) -> dict:
+        """Reinforce one rune with ingredient UIDs, split into safe pages."""
+        return rune.rune_level_up_all(
+            self.client,
+            rune_uid=rune_uid,
+            ingredients_uids=ingredients_uids,
+            page_size=page_size,
+        )
+
+    def soul_list_all(self) -> list[dict]:
+        """Fetch the complete cursor-paginated Soul/纹章 inventory."""
+        return soul.soul_list_all(self.client)
+
+    def soul_level_up(
+        self,
+        *,
+        soul_uid: str,
+        ingredients_uids: list[str],
+    ) -> dict:
+        """Send one Soul level-up request with ingredient UIDs."""
+        return soul.soul_level_up(
+            self.client,
+            soul_uid=soul_uid,
+            ingredients_uids=ingredients_uids,
+        )
 
     def clear_session_crypto(self) -> None:
         """Drop bearer/session crypto so the next bootstrap does a fresh auth."""
