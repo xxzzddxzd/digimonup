@@ -218,6 +218,32 @@ def fetch_item_ticket_stock(session: GameSession) -> tuple[dict, int]:
     return body, 0
 
 
+def ticket_stock_from_payload(payload: Any) -> Optional[int]:
+    """Read ItemTicket (type 50) remaining from goods / spawn payloads.
+
+    Successful spawn-and-sell responses include current stock under
+    ``_rewardAllList._goodsList`` even when opened items were auto-sold.
+    """
+    if not isinstance(payload, dict):
+        return None
+    candidates: list[list] = [
+        _list_from(payload, "_goodsList"),
+        _list_from(payload, "goodsList"),
+    ]
+    ra = payload.get("_rewardAllList") or payload.get("rewardAllList")
+    if isinstance(ra, dict):
+        candidates.append(_list_from(ra, "_goodsList"))
+        candidates.append(_list_from(ra, "goodsList"))
+    for rows in candidates:
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            if _int(item.get("_type", item.get("type")), -1) == GOODS_ITEM_TICKET:
+                return max(0, _int(item.get("_value", item.get("value")), 0))
+    return None
+
+
+
 
 def _list_from(payload: Any, *keys: str) -> list:
     if not isinstance(payload, dict):
@@ -1018,23 +1044,16 @@ def run_spawn_batches(
     result["workers"] = worker_n
     log(f"[*] zb workers={worker_n}")
 
-    # Pre-plan batches so concurrent waves open a fixed total.
-    planned: list[tuple[int, int]] = []
-    remaining_plan = target_items
-    batch_i = 0
-    while remaining_plan > 0 and batch_i < max_batches:
-        this_count = min(batch_count, remaining_plan)
-        planned.append((batch_i + 1, this_count))
-        remaining_plan -= this_count
-        batch_i += 1
-
     items_ok = 0
+    ticket_remaining = item_ticket_start
     equipped_lock = threading.RLock()
     stop = False
+    batch_no = 0
+    idle_waves = 0
 
     def _handle_body(batch_no: int, this_count: int, body: Any) -> tuple[dict[str, Any], bool]:
         """Process one spawn response. Returns (run, should_stop)."""
-        nonlocal items_ok, equipped, stop
+        nonlocal items_ok, equipped, stop, ticket_remaining
         _raise_if_kick(body, "item/spawn-and-sell")
         code = _code(body)
 
@@ -1105,14 +1124,8 @@ def run_spawn_batches(
 
         # Surface transport/server status for CLI (even when log is quiet).
         if isinstance(body, dict):
-            for key in ("_code", "_message", "_isFilterMatched", "_playerLevel"):
-                if key in body and key.lstrip("_") not in {
-                    "code" if key == "_code" else "",
-                }:
-                    pass
             run["raw_code"] = body.get("_code")
             run["raw_message"] = body.get("_message")
-            # compact body keys help diagnose unknown errors
             run["body_keys"] = sorted(str(k) for k in body.keys())
 
         if on_batch is not None:
@@ -1123,13 +1136,34 @@ def run_spawn_batches(
 
         if code == 0:
             result["batches_ok"] += 1
-            items_ok += this_count
+            # Prefer live ticket remaining from response. Concurrent waves can
+            # return multiple code=0 while only one batch actually spent stock;
+            # counting requested this_count would fake progress.
+            stock = ticket_stock_from_payload(body)
+            opened = 0
+            if stock is not None:
+                if stock < ticket_remaining:
+                    opened = ticket_remaining - stock
+                    ticket_remaining = stock
+                else:
+                    opened = 0
+                    run["ticket_unchanged"] = True
+                run["ticket_remaining"] = ticket_remaining
+            else:
+                opened = max(0, int(this_count))
+                ticket_remaining = max(0, ticket_remaining - opened)
+                run["ticket_remaining"] = ticket_remaining
+                run["ticket_estimated"] = True
+            run["opened"] = opened
+            items_ok += opened
             result["items_ok"] = items_ok
+            result["ticket_remaining"] = ticket_remaining
             if progress is not None:
                 progress(items_ok, target_items)
             log(
                 f"[+] zb spawn ok batch={batch_no} matched={run.get('is_filter_matched')} "
-                f"items={items_ok}/{target_items} workers={worker_n}"
+                f"opened={opened} items={items_ok}/{target_items} "
+                f"ticket_left={ticket_remaining} workers={worker_n}"
             )
             if run.get("is_filter_matched") and isinstance(body, dict):
                 try:
@@ -1176,31 +1210,47 @@ def run_spawn_batches(
             )
         return run, True
 
-    # Wave concurrency: fire up to worker_n spawns, wait, then handle in batch order.
-    # Match equip/sell stays serial under equipped_lock to avoid -35004 races.
-    planned_i = 0
-    while planned_i < len(planned) and not stop:
-        wave = planned[planned_i : planned_i + worker_n]
-        planned_i += len(wave)
+    # Dynamic waves: re-issue until ticket-based progress hits target.
+    # Concurrent code=0 may not spend stock; fixed pre-plan would under-open.
+    while not stop and items_ok < target_items and ticket_remaining > 0:
+        need = target_items - items_ok
+        if need <= 0:
+            break
+        # Upper bound of concurrent requests this wave.
+        slots = max(1, min(worker_n, (need + batch_count - 1) // batch_count))
+        # Don't fire more requests than remaining tickets can support.
+        slots = min(slots, max(1, (ticket_remaining + batch_count - 1) // batch_count))
+        wave: list[tuple[int, int]] = []
+        plan_left = min(need, ticket_remaining)
+        for _ in range(slots):
+            if plan_left <= 0:
+                break
+            batch_no += 1
+            this_count = min(batch_count, plan_left)
+            wave.append((batch_no, this_count))
+            plan_left -= this_count
+        if not wave:
+            break
+
         if worker_n == 1:
             wave_results: list[tuple[int, int, Any]] = []
-            for batch_no, this_count in wave:
+            for bno, this_count in wave:
                 try:
                     body = _do_spawn(this_count)
                 except SessionKicked:
                     raise
                 except Exception as exc:
                     body = {"_code": -1, "_message": str(exc)}
-                wave_results.append((batch_no, this_count, body))
+                wave_results.append((bno, this_count, body))
         else:
             wave_results = []
             with ThreadPoolExecutor(max_workers=worker_n) as pool:
                 futs = {
-                    pool.submit(_do_spawn, this_count): (batch_no, this_count)
-                    for batch_no, this_count in wave
+                    pool.submit(_do_spawn, this_count): (bno, this_count)
+                    for bno, this_count in wave
                 }
                 for fut in as_completed(futs):
-                    batch_no, this_count = futs[fut]
+                    bno, this_count = futs[fut]
                     try:
                         body = fut.result()
                     except SessionKicked:
@@ -1208,15 +1258,49 @@ def run_spawn_batches(
                         raise
                     except Exception as exc:
                         body = {"_code": -1, "_message": str(exc)}
-                    wave_results.append((batch_no, this_count, body))
+                    wave_results.append((bno, this_count, body))
             wave_results.sort(key=lambda row: row[0])
 
-        # Always drain this wave: tickets may already be spent on every in-flight spawn.
-        for batch_no, this_count, body in wave_results:
-            run, should_stop = _handle_body(batch_no, this_count, body)
+        before_items = items_ok
+        for bno, this_count, body in wave_results:
+            run, should_stop = _handle_body(bno, this_count, body)
             result["runs"].append(run)
             if should_stop:
                 stop = True
+
+        # Hard reconcile: ticket stock is source of truth.
+        if worker_n > 1 and not stop:
+            try:
+                _, live = fetch_item_ticket_stock(session)
+                items_ok = max(0, item_ticket_start - int(live))
+                ticket_remaining = int(live)
+                result["items_ok"] = items_ok
+                result["ticket_remaining"] = ticket_remaining
+                if progress is not None:
+                    progress(items_ok, target_items)
+                log(
+                    f"[*] zb reconcile ticket_left={ticket_remaining} "
+                    f"items_ok={items_ok}/{target_items}"
+                )
+            except Exception as exc:
+                log(f"[!] zb ticket reconcile failed: {exc}")
+
+        gained = items_ok - before_items
+        if gained <= 0:
+            idle_waves += 1
+        else:
+            idle_waves = 0
+        # Two consecutive waves with no ticket movement → give up.
+        if idle_waves >= 2 and items_ok < target_items:
+            result["error"] = (
+                "spawn_no_ticket_progress "
+                f"(workers={worker_n}, idle_waves={idle_waves}); "
+                "server accepted requests but stock did not drop"
+            )
+            log(f"[!] zb {result['error']}")
+            stop = True
+        if items_ok >= target_items:
+            stop = True
 
     result["items_ok"] = items_ok
     try:
@@ -1225,7 +1309,22 @@ def run_spawn_batches(
     except Exception as exc:
         result["after_error"] = str(exc)
     try:
-        _, result["item_ticket_after"] = fetch_item_ticket_stock(session)
+        _, live_after = fetch_item_ticket_stock(session)
+        result["item_ticket_after"] = live_after
+        # Final authority: actual ticket consumption.
+        true_opened = max(0, item_ticket_start - int(live_after))
+        result["items_ok_ticket_delta"] = true_opened
+        if true_opened != items_ok:
+            log(
+                f"[!] zb progress items_ok={items_ok} but ticket_delta={true_opened}; "
+                "using ticket_delta"
+            )
+            items_ok = true_opened
+            result["items_ok"] = items_ok
+            ticket_remaining = int(live_after)
+            result["ticket_remaining"] = ticket_remaining
+            if progress is not None:
+                progress(items_ok, target_items)
     except Exception as exc:
         result["item_ticket_after_error"] = str(exc)
 
