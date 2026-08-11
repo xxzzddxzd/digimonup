@@ -239,7 +239,7 @@ def cmd_zb(
     filter_grade: int = DEFAULT_FILTER_GRADE,
     filter_match: int = DEFAULT_FILTER_MATCH_COUNT,
     filter_stat: list[int] | None = None,
-    workers: int = 2,
+    workers: int = 1,
 ) -> int:
     """One-shot 开装备 (default: open all startup ItemTicket stock)."""
     progress_width = 20
@@ -771,8 +771,8 @@ def main() -> int:
         "-j",
         "--workers",
         type=int,
-        default=2,
-        help="zb: concurrent spawn-and-sell workers (default 2; use 1 to disable)",
+        default=1,
+        help="zb: concurrent spawn-and-sell workers (default 1 = serial; try 2 for wave concurrency)",
     )
     parser.add_argument(
         "fb_key",
@@ -890,7 +890,6 @@ def main() -> int:
     print("  python3 main.py zb --filter-grade 10 --filter-match 2 --filter-stat 10,20,13")
     print("  python3 main.py zb --filter-grade 0 --filter-match 0 --filter-stat \"\"")
     print("  python3 main.py zb -j 2")
-    print("  python3 main.py zb -j 1")
     print("  python3 main.py fb 1")
     print("  python3 main.py fb 2 --level 56")
     print("  python3 main.py fb 3")

@@ -77,14 +77,14 @@ autorun `zb` 默认已对齐上表，见 `autorun/client/item_spawner_care.py`�
 - `DEFAULT_FILTER_GRADE = 10`
 - `DEFAULT_FILTER_MATCH_COUNT = 2`
 - `DEFAULT_FILTER_STAT_TYPE_LIST = [10, 20, 13]`
-- 默认 `-j/--workers 2` 波次并发
+- 默认串行；可选 `-j 2` 波次并发
 
 覆盖示例：
 
 ```bash
 cd autorun
 python3 main.py zb
-python3 main.py zb -j 1
+python3 main.py zb -j 2
 python3 main.py zb --filter-grade 0 --filter-match 0 --filter-stat ""
 ```
 

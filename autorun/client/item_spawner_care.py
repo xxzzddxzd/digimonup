@@ -878,7 +878,7 @@ def run_spawn_batches(
     filter_grade: int = DEFAULT_FILTER_GRADE,
     filter_match_count: int = DEFAULT_FILTER_MATCH_COUNT,
     filter_stat_type_list: Optional[list[int]] = None,
-    workers: int = 2,
+    workers: int = 1,
     auto_equip: bool = True,
     auto_sell: bool = True,
     log: LogFn = print,
@@ -891,8 +891,8 @@ def run_spawn_batches(
 
     When _isFilterMatched: compare vs equipped; if better equip+sell old, else sell new.
     Stop early on spawn failure.
-    Wave concurrency via ``workers`` (default 2): multiple spawn-and-sell in flight,
-    then equip/sell handled serially.
+    Optional wave concurrency via ``workers`` (>1). Default 1 = serial (original).
+    When workers>1, equip/sell still handled serially.
     """
     if filter_stat_type_list is None:
         filter_stat_type_list = list(DEFAULT_FILTER_STAT_TYPE_LIST)
@@ -1407,7 +1407,7 @@ def run_zb(
     filter_grade: int = DEFAULT_FILTER_GRADE,
     filter_match_count: int = DEFAULT_FILTER_MATCH_COUNT,
     filter_stat_type_list: Optional[list[int]] = None,
-    workers: int = 2,
+    workers: int = 1,
     auto_equip: bool = True,
     auto_sell: bool = True,
     log: LogFn = print,

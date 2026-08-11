@@ -168,8 +168,7 @@ python3 main.py zb --batches 5  # 连续 5 批
 python3 main.py zb --info       # 只查炉子快照 / 升级所需 bit（不操作）
 python3 main.py zb --filter-grade 10 --filter-match 2 --filter-stat 10,20,13
 python3 main.py zb --filter-grade 0 --filter-match 0 --filter-stat ""   # 关闭筛选
-python3 main.py zb -j 2            # 2 线程并发开装备（默认）
-python3 main.py zb -j 1            # 串行
+python3 main.py zb -j 2            # 可选：2 线程波次并发
 ```
 
 开装备走 `POST /api/item/spawn-and-sell`。默认筛选对齐实机客户端（2026-08-11 / 1.2.4）：
@@ -177,7 +176,7 @@ python3 main.py zb -j 1            # 串行
 - `_filterGrade=10`
 - `_filterMatchCount=2`
 - `_filterStatTypeList=[10,20,13]`（暴击率 / 眩晕率 / 技能暴击率）
-- 默认 `-j/--workers 2`：按波次并发 `spawn-and-sell`，换装/出售仍串行
+- 默认串行；可选 `-j 2` 波次并发 `spawn-and-sell`（换装/出售仍串行）
 
 炉子维护（查 info / 投 bit / 满了建造 / 建造完成）在 `auto` 里由 `run_item_spawner_care` 自动跑，不进 `zb`。
 设备日志对照见 `iosver/SOP_DEVICE_LOGS.md`。
