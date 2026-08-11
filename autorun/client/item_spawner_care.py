@@ -28,6 +28,8 @@ from .session import GameSession
 
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[int, int], None]
+# batch_no, this_count, run dict (code/message/matched/...), raw body
+BatchStatusFn = Callable[[int, int, dict[str, Any], Any], None]
 
 SESSION_KICK = -19006
 GOODS_GOLD = 0  # E_GOODS_TYPE.Gold — 比特 / bit
@@ -883,6 +885,7 @@ def run_spawn_batches(
     auto_sell: bool = True,
     log: LogFn = print,
     progress: ProgressFn | None = None,
+    on_batch: BatchStatusFn | None = None,
 ) -> dict[str, Any]:
     """Open equip via spawn-and-sell.
 
@@ -1099,6 +1102,24 @@ def run_spawn_batches(
             ra = body["_rewardAllList"]
             if isinstance(ra, dict):
                 run["reward_keys"] = sorted(ra.keys())
+
+        # Surface transport/server status for CLI (even when log is quiet).
+        if isinstance(body, dict):
+            for key in ("_code", "_message", "_isFilterMatched", "_playerLevel"):
+                if key in body and key.lstrip("_") not in {
+                    "code" if key == "_code" else "",
+                }:
+                    pass
+            run["raw_code"] = body.get("_code")
+            run["raw_message"] = body.get("_message")
+            # compact body keys help diagnose unknown errors
+            run["body_keys"] = sorted(str(k) for k in body.keys())
+
+        if on_batch is not None:
+            try:
+                on_batch(batch_no, this_count, run, body)
+            except Exception as exc:
+                log(f"[!] zb on_batch callback failed: {exc}")
 
         if code == 0:
             result["batches_ok"] += 1
@@ -1412,6 +1433,7 @@ def run_zb(
     auto_sell: bool = True,
     log: LogFn = print,
     progress: ProgressFn | None = None,
+    on_batch: BatchStatusFn | None = None,
 ) -> dict[str, Any]:
     """CLI zb: open equip only (spawn-and-sell). Furnace care is auto-only.
 
@@ -1469,6 +1491,7 @@ def run_zb(
         auto_sell=auto_sell,
         log=log,
         progress=progress,
+        on_batch=on_batch,
     )
     out["spawn"] = sp_res
     out["ok"] = bool(sp_res.get("ok"))

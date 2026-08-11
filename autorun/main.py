@@ -246,6 +246,12 @@ def cmd_zb(
     progress_open = False
     progress_total: int | None = None
 
+    def _break_progress() -> None:
+        nonlocal progress_open
+        if progress_open:
+            print(flush=True)
+            progress_open = False
+
     def show_progress(opened: int, total_at_start: int) -> None:
         nonlocal progress_open, progress_total
         if progress_total is None:
@@ -264,6 +270,42 @@ def cmd_zb(
             flush=True,
         )
         progress_open = not finished
+
+    def show_batch(
+        batch_no: int,
+        this_count: int,
+        run: dict,
+        body: object,
+    ) -> None:
+        """Print every spawn-and-sell server result (ok or error)."""
+        code = run.get("code")
+        message = run.get("message") or run.get("raw_message")
+        matched = run.get("is_filter_matched")
+        ok = code in (0, None)
+        status = "OK" if ok else "FAIL"
+        line = (
+            f"[zb] batch={batch_no} count={this_count} {status} "
+            f"code={code} matched={matched}"
+        )
+        if message:
+            line += f" msg={message}"
+        if not ok and isinstance(body, dict):
+            # extra server fields that often explain rejects
+            for key in (
+                "_error",
+                "_errorCode",
+                "_errorMessage",
+                "_result",
+                "_reason",
+            ):
+                if body.get(key) not in (None, "", []):
+                    line += f" {key}={body.get(key)}"
+            keys = run.get("body_keys")
+            if keys:
+                line += f" keys={keys}"
+        _break_progress()
+        # errors to stderr so they stand out in redirected logs
+        print(line, file=(sys.stderr if not ok else sys.stdout), flush=True)
 
     session = _load_session()
     session.client.log_enabled = bool(info_only)
@@ -297,12 +339,24 @@ def cmd_zb(
             workers=max(1, int(workers or 1)),
             log=print if info_only else (lambda _message: None),
             progress=None if info_only else show_progress,
+            on_batch=None if info_only else show_batch,
         )
         result.update(stats)
+        if not info_only:
+            spawn = stats.get("spawn") if isinstance(stats, dict) else None
+            if isinstance(spawn, dict):
+                ticket_after = spawn.get("item_ticket_after")
+                items_ok = spawn.get("items_ok")
+                batches_ok = spawn.get("batches_ok")
+                if ticket_after is not None or items_ok is not None:
+                    _break_progress()
+                    print(
+                        f"[zb] summary items_ok={items_ok} batches_ok={batches_ok} "
+                        f"ticket_after={ticket_after} ok={result.get('ok')}",
+                        flush=True,
+                    )
         if not info_only and not result.get("ok"):
-            if progress_open:
-                print()
-                progress_open = False
+            _break_progress()
             spawn = stats.get("spawn") if isinstance(stats, dict) else None
             runs = spawn.get("runs") if isinstance(spawn, dict) else None
             last_run = runs[-1] if isinstance(runs, list) and runs else {}
@@ -311,6 +365,18 @@ def cmd_zb(
             detail = f"：code={code}" if code is not None else ""
             if message:
                 detail += f" message={message}"
+            # show last few non-ok or last 3 runs for context
+            if isinstance(runs, list) and runs:
+                tail = runs[-5:]
+                print("[zb] last runs:", file=sys.stderr)
+                for r in tail:
+                    if not isinstance(r, dict):
+                        continue
+                    print(
+                        f"  batch={r.get('batch')} code={r.get('code')} "
+                        f"msg={r.get('message')} matched={r.get('is_filter_matched')}",
+                        file=sys.stderr,
+                    )
             print(f"开装备失败{detail}", file=sys.stderr)
     except Exception as exc:
         result["error"] = str(exc)
