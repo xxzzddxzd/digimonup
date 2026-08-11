@@ -163,56 +163,21 @@ python3 main.py pvp                 # 打完常规票(356) + 赛季票(357)
 ### 开装备 zb
 
 ```bash
-python3 main.py zb              # 开 1 批装备（数量=当前炉子 SpawnCount，lv17=8）
+python3 main.py zb              # 开完全部 ItemTicket；默认带客户端筛选参数
 python3 main.py zb --batches 5  # 连续 5 批
 python3 main.py zb --info       # 只查炉子快照 / 升级所需 bit（不操作）
+python3 main.py zb --filter-grade 10 --filter-match 2 --filter-stat 10,20,13
+python3 main.py zb --filter-grade 0 --filter-match 0 --filter-stat ""   # 关闭筛选
+python3 main.py zb -j 2            # 2 线程并发开装备（默认）
+python3 main.py zb -j 1            # 串行
 ```
 
-开装备走 `POST /api/item/spawn-and-sell`。炉子维护（查 info / 投 bit / 满了建造 / 建造完成）在 `auto` 里由 `run_item_spawner_care` 自动跑，不进 `zb`。
+开装备走 `POST /api/item/spawn-and-sell`。默认筛选对齐实机客户端（2026-08-11 / 1.2.4）：
 
-本地表：`item_spawner_table.json`。剩余 bit = `Gold * (GoldCount - _count)`。
+- `_filterGrade=10`
+- `_filterMatchCount=2`
+- `_filterStatTypeList=[10,20,13]`（暴击率 / 眩晕率 / 技能暴击率）
+- 默认 `-j/--workers 2`：按波次并发 `spawn-and-sell`，换装/出售仍串行
 
-## 训练配置
-
-手动编辑 `lab_config.json`（与 `main.py` 同目录）：
-
-```json
-{
-  "default_max_level": 10,
-  "max_level": {
-    "14": 1, "20": 1, "26": 1, "34": 1,
-    "33": 999, "35": 999, "36": 999
-  },
-  "priority": [11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-}
-```
-
-- `max_level`：每个训练点 `_key` 的等级上限（满级后 auto 会换下一个）
-  - 默认 10；`14/20/26/34` 为 1；`33/35/36` 为 999
-- `priority`：选下一点时的优先顺序
-- `default_max_level`：未写明的 key 默认上限
-
-## 辅助脚本
-
-| 脚本 | 作用 |
-| --- | --- |
-| `./run_auto.sh` | 在本目录执行一次 `main.py auto` |
-| `./install_cron_entry.sh` | 同上（带 skip-if-running + cron 日志） |
-| `./kill_auto.sh` | 只杀 `main.py auto` / 旧 `qmdauto` |
-| `./ensure_qmdauto.sh` | 兼容旧名，转调本目录 auto |
-
-## macOS crontab（与 dqsg 相同：直接跑本仓库）
-
-```bash
-# crontab -e 加一行（每小时）
-0 * * * * cd /Users/xuzhengda/Documents/workspace/smbb/autorun && /Users/xuzhengda/.pyenv/versions/3.12.8/bin/python3 main.py auto >> logs/auto_cron.log 2>&1
-```
-
-- 运行目录就是 `Documents/workspace/smbb/autorun`，**改代码后无需 sync**
-- 日志：`logs/auto.log`、`logs/auto_run.log`（若用 `install_cron_entry.sh`）、`logs/auto_cron.log`
-
-## 本地文件
-
-- `account.json`：账号（导入生成，不提交）
-- `logs/`：运行日志
-- `last_run.json` / `drop_stats.json`：最近一次运行摘要与掉落（gitignore）
+炉子维护（查 info / 投 bit / 满了建造 / 建造完成）在 `auto` 里由 `run_item_spawner_care` 自动跑，不进 `zb`。
+设备日志对照见 `iosver/SOP_DEVICE_LOGS.md`。

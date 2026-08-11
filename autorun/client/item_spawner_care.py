@@ -16,6 +16,8 @@ Runtime info (_itemSpawner):
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -30,6 +32,12 @@ ProgressFn = Callable[[int, int], None]
 SESSION_KICK = -19006
 GOODS_GOLD = 0  # E_GOODS_TYPE.Gold — 比特 / bit
 GOODS_ITEM_TICKET = 50  # E_GOODS_TYPE.ItemTicket — 装备生成券
+
+# Live client spawn-and-sell filter (device capture 2026-08-11, game 1.2.4).
+# E_STAT: 10=CriticalRate, 20=StunRate, 13=SkillCriticalRate
+DEFAULT_FILTER_GRADE = 10
+DEFAULT_FILTER_MATCH_COUNT = 2
+DEFAULT_FILTER_STAT_TYPE_LIST: list[int] = [10, 20, 13]
 
 TABLE_PATH = Path(__file__).resolve().parent.parent / "item_spawner_table.json"
 
@@ -770,8 +778,8 @@ def process_pending_bag_items(
 def fetch_stuck_spawn_body(
     session: GameSession,
     *,
-    filter_grade: int = 0,
-    filter_match_count: int = 0,
+    filter_grade: int = DEFAULT_FILTER_GRADE,
+    filter_match_count: int = DEFAULT_FILTER_MATCH_COUNT,
     filter_stat_type_list: Optional[list[int]] = None,
 ) -> dict:
     """POST spawn-and-sell with _count=0 to read server-side pending spawn queue.
@@ -797,8 +805,8 @@ def resolve_stuck_spawn_queue(
     equipped: dict[int, dict] | None = None,
     auto_equip: bool = True,
     auto_sell: bool = True,
-    filter_grade: int = 0,
-    filter_match_count: int = 0,
+    filter_grade: int = DEFAULT_FILTER_GRADE,
+    filter_match_count: int = DEFAULT_FILTER_MATCH_COUNT,
     filter_stat_type_list: Optional[list[int]] = None,
     log: LogFn = print,
 ) -> dict[str, Any]:
@@ -867,9 +875,10 @@ def run_spawn_batches(
     total: Optional[int] = None,
     count: Optional[int] = None,
     item_ticket_start: Optional[int] = None,
-    filter_grade: int = 0,
-    filter_match_count: int = 0,
+    filter_grade: int = DEFAULT_FILTER_GRADE,
+    filter_match_count: int = DEFAULT_FILTER_MATCH_COUNT,
     filter_stat_type_list: Optional[list[int]] = None,
+    workers: int = 2,
     auto_equip: bool = True,
     auto_sell: bool = True,
     log: LogFn = print,
@@ -882,7 +891,11 @@ def run_spawn_batches(
 
     When _isFilterMatched: compare vs equipped; if better equip+sell old, else sell new.
     Stop early on spawn failure.
+    Wave concurrency via ``workers`` (default 2): multiple spawn-and-sell in flight,
+    then equip/sell handled serially.
     """
+    if filter_stat_type_list is None:
+        filter_stat_type_list = list(DEFAULT_FILTER_STAT_TYPE_LIST)
     table = load_spawner_table()
     result: dict[str, Any] = {
         "ok": False,
@@ -998,80 +1011,95 @@ def run_spawn_batches(
             filter_stat_type_list=filter_stat_type_list,
         )
 
+    worker_n = max(1, int(workers or 1))
+    result["workers"] = worker_n
+    log(f"[*] zb workers={worker_n}")
+
+    # Pre-plan batches so concurrent waves open a fixed total.
+    planned: list[tuple[int, int]] = []
+    remaining_plan = target_items
+    batch_i = 0
+    while remaining_plan > 0 and batch_i < max_batches:
+        this_count = min(batch_count, remaining_plan)
+        planned.append((batch_i + 1, this_count))
+        remaining_plan -= this_count
+        batch_i += 1
+
     items_ok = 0
-    for i in range(max_batches):
-        remain = target_items - items_ok
-        if remain <= 0:
-            log(f"[*] zb target reached items={items_ok}/{target_items}, stop")
-            break
-        this_count = min(batch_count, remain)
-        log(
-            f"[*] zb spawn-and-sell batch={i + 1}/{max_batches} "
-            f"count={this_count} progress={items_ok}/{target_items} "
-            f"filterGrade={filter_grade} match={filter_match_count}"
-        )
-        body = _do_spawn(this_count)
+    equipped_lock = threading.RLock()
+    stop = False
+
+    def _handle_body(batch_no: int, this_count: int, body: Any) -> tuple[dict[str, Any], bool]:
+        """Process one spawn response. Returns (run, should_stop)."""
+        nonlocal items_ok, equipped, stop
         _raise_if_kick(body, "item/spawn-and-sell")
         code = _code(body)
-        # pending result items block further spawns (-35004)
+
         if code == -35004 and (auto_sell or auto_equip):
             log(
-                "[!] zb -35004: fetch stuck queue via count=0, "
-                "then compare/equip/sell and retry"
+                f"[!] zb -35004 batch={batch_no}: drain stuck queue "
+                "then retry once"
             )
-            cleanup_bag_keep_best(session, log=log)
-            try:
-                stuck = resolve_stuck_spawn_queue(
-                    session,
-                    equipped=equipped,
-                    auto_equip=auto_equip,
-                    auto_sell=auto_sell,
-                    filter_grade=filter_grade,
-                    filter_match_count=filter_match_count,
-                    filter_stat_type_list=filter_stat_type_list,
-                    log=log,
-                )
-                result["equip_actions"].append(stuck)
-            except SessionKicked:
-                raise
-            except Exception as exc:
-                log(f"[!] zb stuck-queue process failed: {exc}")
-            try:
-                process_pending_bag_items(
-                    session,
-                    equipped=equipped,
-                    auto_equip=auto_equip,
-                    auto_sell=auto_sell,
-                    log=log,
-                )
-            except Exception:
-                pass
-            try:
-                if hasattr(session, "init_data"):
-                    from .apis import account as acc_api
-
-                    session.init_data = acc_api.init_data(session.client)
-                equipped = load_equipped_by_type(session)
-            except Exception:
+            with equipped_lock:
+                cleanup_bag_keep_best(session, log=log)
                 try:
-                    equipped = load_equipped_by_type(session)
+                    stuck = resolve_stuck_spawn_queue(
+                        session,
+                        equipped=equipped,
+                        auto_equip=auto_equip,
+                        auto_sell=auto_sell,
+                        filter_grade=filter_grade,
+                        filter_match_count=filter_match_count,
+                        filter_stat_type_list=filter_stat_type_list,
+                        log=log,
+                    )
+                    result["equip_actions"].append(stuck)
+                except SessionKicked:
+                    raise
+                except Exception as exc:
+                    log(f"[!] zb stuck-queue process failed: {exc}")
+                try:
+                    process_pending_bag_items(
+                        session,
+                        equipped=equipped,
+                        auto_equip=auto_equip,
+                        auto_sell=auto_sell,
+                        log=log,
+                    )
                 except Exception:
                     pass
+                try:
+                    if hasattr(session, "init_data"):
+                        from .apis import account as acc_api
+
+                        session.init_data = acc_api.init_data(session.client)
+                    equipped = load_equipped_by_type(session)
+                except Exception:
+                    try:
+                        equipped = load_equipped_by_type(session)
+                    except Exception:
+                        pass
             body = _do_spawn(this_count)
             _raise_if_kick(body, "item/spawn-and-sell")
             code = _code(body)
+
         run: dict[str, Any] = {
-            "batch": i + 1,
+            "batch": batch_no,
             "count": this_count,
             "code": code,
             "message": body.get("_message") if isinstance(body, dict) else None,
-            "is_filter_matched": body.get("_isFilterMatched") if isinstance(body, dict) else None,
-            "player_level": body.get("_playerLevel") if isinstance(body, dict) else None,
+            "is_filter_matched": body.get("_isFilterMatched")
+            if isinstance(body, dict)
+            else None,
+            "player_level": body.get("_playerLevel")
+            if isinstance(body, dict)
+            else None,
         }
         if isinstance(body, dict) and "_rewardAllList" in body:
             ra = body["_rewardAllList"]
             if isinstance(ra, dict):
                 run["reward_keys"] = sorted(ra.keys())
+
         if code == 0:
             result["batches_ok"] += 1
             items_ok += this_count
@@ -1079,53 +1107,95 @@ def run_spawn_batches(
             if progress is not None:
                 progress(items_ok, target_items)
             log(
-                f"[+] zb spawn ok batch={i + 1} matched={run.get('is_filter_matched')} "
-                f"items={items_ok}/{target_items}"
+                f"[+] zb spawn ok batch={batch_no} matched={run.get('is_filter_matched')} "
+                f"items={items_ok}/{target_items} workers={worker_n}"
             )
-            # Always process when filter matched: compare -> equip if better -> sell
             if run.get("is_filter_matched") and isinstance(body, dict):
                 try:
-                    actions = process_matched_equips(
-                        session,
-                        body,
-                        equipped=equipped,
-                        auto_equip=auto_equip,
-                        auto_sell=auto_sell,
-                        log=log,
-                    )
-                    run["match_actions"] = {
-                        "equipped_n": len(actions.get("equipped") or []),
-                        "sold_n": len(actions.get("sold") or []),
-                        "worse_n": len(actions.get("kept_worse") or []),
-                        "candidates": actions.get("candidates"),
-                        "sell_code": actions.get("sell_code"),
-                        "errors": actions.get("errors"),
-                    }
-                    result["equip_actions"].append(actions)
-                    if auto_equip:
-                        try:
-                            equipped = load_equipped_by_type(session)
-                        except Exception:
-                            pass
+                    with equipped_lock:
+                        actions = process_matched_equips(
+                            session,
+                            body,
+                            equipped=equipped,
+                            auto_equip=auto_equip,
+                            auto_sell=auto_sell,
+                            log=log,
+                        )
+                        run["match_actions"] = {
+                            "equipped_n": len(actions.get("equipped") or []),
+                            "sold_n": len(actions.get("sold") or []),
+                            "worse_n": len(actions.get("kept_worse") or []),
+                            "candidates": actions.get("candidates"),
+                            "sell_code": actions.get("sell_code"),
+                            "errors": actions.get("errors"),
+                        }
+                        result["equip_actions"].append(actions)
+                        if auto_equip:
+                            try:
+                                equipped = load_equipped_by_type(session)
+                            except Exception:
+                                pass
                 except SessionKicked:
                     raise
                 except Exception as exc:
                     run["match_error"] = str(exc)
                     log(f"[!] zb match process failed: {exc}")
             if items_ok >= target_items:
-                result["runs"].append(run)
                 log(f"[*] zb done: opened {items_ok} items (target {target_items})")
-                break
+                return run, True
+            return run, False
+
+        log(
+            f"[-] zb spawn fail batch={batch_no} code={code} msg={run.get('message')}"
+        )
+        if code == -35004:
+            log(
+                "[!] zb -35004 persists after stuck-queue drain "
+                "(count=0 → compare/equip/sell). Check last_zb.json."
+            )
+        return run, True
+
+    # Wave concurrency: fire up to worker_n spawns, wait, then handle in batch order.
+    # Match equip/sell stays serial under equipped_lock to avoid -35004 races.
+    planned_i = 0
+    while planned_i < len(planned) and not stop:
+        wave = planned[planned_i : planned_i + worker_n]
+        planned_i += len(wave)
+        if worker_n == 1:
+            wave_results: list[tuple[int, int, Any]] = []
+            for batch_no, this_count in wave:
+                try:
+                    body = _do_spawn(this_count)
+                except SessionKicked:
+                    raise
+                except Exception as exc:
+                    body = {"_code": -1, "_message": str(exc)}
+                wave_results.append((batch_no, this_count, body))
         else:
+            wave_results = []
+            with ThreadPoolExecutor(max_workers=worker_n) as pool:
+                futs = {
+                    pool.submit(_do_spawn, this_count): (batch_no, this_count)
+                    for batch_no, this_count in wave
+                }
+                for fut in as_completed(futs):
+                    batch_no, this_count = futs[fut]
+                    try:
+                        body = fut.result()
+                    except SessionKicked:
+                        stop = True
+                        raise
+                    except Exception as exc:
+                        body = {"_code": -1, "_message": str(exc)}
+                    wave_results.append((batch_no, this_count, body))
+            wave_results.sort(key=lambda row: row[0])
+
+        # Always drain this wave: tickets may already be spent on every in-flight spawn.
+        for batch_no, this_count, body in wave_results:
+            run, should_stop = _handle_body(batch_no, this_count, body)
             result["runs"].append(run)
-            log(f"[-] zb spawn fail batch={i + 1} code={code} msg={run.get('message')}")
-            if code == -35004:
-                log(
-                    "[!] zb -35004 persists after stuck-queue drain "
-                    "(count=0 → compare/equip/sell). Check last_zb.json."
-                )
-            break
-        result["runs"].append(run)
+            if should_stop:
+                stop = True
 
     result["items_ok"] = items_ok
     try:
@@ -1334,8 +1404,10 @@ def run_zb(
     total: Optional[int] = None,
     count: Optional[int] = None,
     info_only: bool = False,
-    filter_grade: int = 0,
-    filter_match_count: int = 0,
+    filter_grade: int = DEFAULT_FILTER_GRADE,
+    filter_match_count: int = DEFAULT_FILTER_MATCH_COUNT,
+    filter_stat_type_list: Optional[list[int]] = None,
+    workers: int = 2,
     auto_equip: bool = True,
     auto_sell: bool = True,
     log: LogFn = print,
@@ -1345,6 +1417,7 @@ def run_zb(
 
     Default opens all ItemTicket stock present at startup.
     Override with ``total`` or ``batches``.
+    Filter defaults match the live client capture (grade/match/stat list).
     """
     table = load_spawner_table()
     out: dict[str, Any] = {"ok": False, "mode": "zb"}
@@ -1367,6 +1440,21 @@ def run_zb(
         out["ok"] = True
         return out
 
+    stats_filter = (
+        list(DEFAULT_FILTER_STAT_TYPE_LIST)
+        if filter_stat_type_list is None
+        else list(filter_stat_type_list)
+    )
+    out["filter"] = {
+        "grade": int(filter_grade),
+        "match_count": int(filter_match_count),
+        "stat_type_list": stats_filter,
+    }
+    log(
+        f"[*] zb filter grade={filter_grade} match={filter_match_count} "
+        f"stats={stats_filter}"
+    )
+
     sp_res = run_spawn_batches(
         session,
         batches=batches,
@@ -1375,6 +1463,8 @@ def run_zb(
         item_ticket_start=item_ticket_start,
         filter_grade=filter_grade,
         filter_match_count=filter_match_count,
+        filter_stat_type_list=stats_filter,
+        workers=workers,
         auto_equip=auto_equip,
         auto_sell=auto_sell,
         log=log,

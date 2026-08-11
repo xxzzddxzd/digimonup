@@ -15,7 +15,12 @@ from client.account_store import apply_account_to_config, import_input_file, loa
 from client.qmd_auto import run_auto_once
 from client.farm import FarmConfig, FarmRunner
 from client.promotion_care import build_promotion_snapshot, format_promo_line
-from client.item_spawner_care import run_zb
+from client.item_spawner_care import (
+    DEFAULT_FILTER_GRADE,
+    DEFAULT_FILTER_MATCH_COUNT,
+    DEFAULT_FILTER_STAT_TYPE_LIST,
+    run_zb,
+)
 from client.pvp_care import run_pvp
 from client.dungeon_care import (
     ADVANCING_DUNGEON_CONFIG,
@@ -231,8 +236,10 @@ def cmd_zb(
     total: int | None = None,
     count: int | None = None,
     info_only: bool = False,
-    filter_grade: int = 0,
-    filter_match: int = 0,
+    filter_grade: int = DEFAULT_FILTER_GRADE,
+    filter_match: int = DEFAULT_FILTER_MATCH_COUNT,
+    filter_stat: list[int] | None = None,
+    workers: int = 2,
 ) -> int:
     """One-shot 开装备 (default: open all startup ItemTicket stock)."""
     progress_width = 20
@@ -282,6 +289,12 @@ def cmd_zb(
             info_only=bool(info_only),
             filter_grade=int(filter_grade),
             filter_match_count=int(filter_match),
+            filter_stat_type_list=(
+                list(DEFAULT_FILTER_STAT_TYPE_LIST)
+                if filter_stat is None
+                else list(filter_stat)
+            ),
+            workers=max(1, int(workers or 1)),
             log=print if info_only else (lambda _message: None),
             progress=None if info_only else show_progress,
         )
@@ -729,14 +742,37 @@ def main() -> int:
     parser.add_argument(
         "--filter-grade",
         type=int,
-        default=0,
-        help="zb: _filterGrade for spawn-and-sell (default 0)",
+        default=DEFAULT_FILTER_GRADE,
+        help=(
+            "zb: _filterGrade for spawn-and-sell "
+            f"(default {DEFAULT_FILTER_GRADE}, live client)"
+        ),
     )
     parser.add_argument(
         "--filter-match",
         type=int,
-        default=0,
-        help="zb: _filterMatchCount for spawn-and-sell (default 0)",
+        default=DEFAULT_FILTER_MATCH_COUNT,
+        help=(
+            "zb: _filterMatchCount for spawn-and-sell "
+            f"(default {DEFAULT_FILTER_MATCH_COUNT}, live client)"
+        ),
+    )
+    parser.add_argument(
+        "--filter-stat",
+        type=str,
+        default=",".join(str(x) for x in DEFAULT_FILTER_STAT_TYPE_LIST),
+        help=(
+            "zb: comma-separated _filterStatTypeList E_STAT ids "
+            f"(default {','.join(str(x) for x in DEFAULT_FILTER_STAT_TYPE_LIST)} = "
+            "CriticalRate,StunRate,SkillCriticalRate)"
+        ),
+    )
+    parser.add_argument(
+        "-j",
+        "--workers",
+        type=int,
+        default=2,
+        help="zb: concurrent spawn-and-sell workers (default 2; use 1 to disable)",
     )
     parser.add_argument(
         "fb_key",
@@ -818,13 +854,23 @@ def main() -> int:
             )
         return cmd_fb(str(alias), level=args.level)
     if args.command == "zb":
+        def _parse_filter_stat(raw: str | None) -> list[int]:
+            if raw is None:
+                return list(DEFAULT_FILTER_STAT_TYPE_LIST)
+            s = str(raw).strip()
+            if not s:
+                return []
+            return [int(part.strip()) for part in s.split(",") if part.strip()]
+
         return cmd_zb(
             batches=args.batches,
             total=int(args.total) if args.total is not None else None,
             count=args.count,
             info_only=bool(args.info),
-            filter_grade=int(args.filter_grade or 0),
-            filter_match=int(args.filter_match or 0),
+            filter_grade=int(args.filter_grade),
+            filter_match=int(args.filter_match),
+            filter_stat=_parse_filter_stat(args.filter_stat),
+            workers=max(1, int(args.workers or 1)),
         )
 
     parser.print_help()
@@ -841,6 +887,10 @@ def main() -> int:
     print("  python3 main.py zb --total 1000")
     print("  python3 main.py zb --batches 3")
     print("  python3 main.py zb --count 8 --batches 1")
+    print("  python3 main.py zb --filter-grade 10 --filter-match 2 --filter-stat 10,20,13")
+    print("  python3 main.py zb --filter-grade 0 --filter-match 0 --filter-stat \"\"")
+    print("  python3 main.py zb -j 2")
+    print("  python3 main.py zb -j 1")
     print("  python3 main.py fb 1")
     print("  python3 main.py fb 2 --level 56")
     print("  python3 main.py fb 3")

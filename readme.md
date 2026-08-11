@@ -1,6 +1,6 @@
 # DIGIMON UP 插件工程
 
-本工程用于调试和扩展 DIGIMON UP 的 Unity/IL2CPP 客户端，包含 iOS 越狱设备版和 PlayCover/macOS 版插件。当前目标 Bundle ID 为 `jp.co.bandainamcoent.BNEI0442`。iOS 版（`iosver`）UnityFramework 偏移对应游戏 1.2.2；Mac/PlayCover 版仍对应 1.0.2。
+本工程用于调试和扩展 DIGIMON UP 的 Unity/IL2CPP 客户端，包含 iOS 越狱设备版和 PlayCover/macOS 版插件。当前目标 Bundle ID 为 `jp.co.bandainamcoent.BNEI0442`。iOS 版（`iosver`）UnityFramework 偏移对应游戏 1.2.4；Mac/PlayCover 版仍对应 1.0.2。
 
 ## 目录
 
@@ -52,3 +52,7 @@ chmod +x 安装插件.command pc_macho_inject
 [`macver/end_user/安装说明.md`](macver/end_user/安装说明.md)。
 
 运行日志和本地编译产物不纳入版本控制。插件日志统一以 `#pc  ` 开头，便于过滤。
+
+## 设备日志 SOP
+
+越狱机 PCJBProbe 日志拉取与 `zb` 筛选参数对照：见 [`iosver/SOP_DEVICE_LOGS.md`](iosver/SOP_DEVICE_LOGS.md)。

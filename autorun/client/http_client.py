@@ -33,7 +33,10 @@ class ApiClient:
         self.log_enabled = log
         self._logger = logger or print
         self.state = STATE
+        # Protect rare shared mutation; network I/O is concurrent-safe via
+        # thread-local Sessions (requests.Session is not thread-safe).
         self._lock = threading.RLock()
+        self._local = threading.local()
 
     def set_crypto(self, hex_key: str, hex_iv: str) -> None:
         self.hex_key = hex_key
@@ -58,9 +61,19 @@ class ApiClient:
             "x-idempotency-key": str(uuid.uuid4()),
         }
 
+    def _thread_session(self) -> requests.Session:
+        sess = getattr(self._local, "session", None)
+        if sess is None:
+            # Main thread reuses the primary Session; workers get their own.
+            if threading.current_thread() is threading.main_thread():
+                sess = self.session
+            else:
+                sess = requests.Session()
+            self._local.session = sess
+        return sess
+
     def _post(self, path: str, body: dict) -> tuple[dict, float, str, int]:
-        with self._lock:
-            return self._post_unlocked(path, body)
+        return self._post_unlocked(path, body)
 
     def _post_unlocked(self, path: str, body: dict) -> tuple[dict, float, str, int]:
         url = path if path.startswith("http") else f"{self.base_url}{path}"
@@ -71,7 +84,7 @@ class ApiClient:
             STATE.add_http_req(url)
 
         t0 = time.time()
-        resp = self.session.post(
+        resp = self._thread_session().post(
             url,
             headers=self._headers(),
             data=json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8"),
