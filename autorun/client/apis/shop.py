@@ -33,6 +33,11 @@ def shop_buy(client: "ApiClient", *, key: int, count: int = 1) -> dict:
     )
 
 
+def shop_spawn(client: "ApiClient", *, key: int) -> dict:
+    """POST /api/shop/spawn {_key} — skill/member ticket spawn."""
+    return client.post_encrypted("/api/shop/spawn", {"_key": int(key)})
+
+
 def shop_level_list(client: "ApiClient") -> dict:
     return client.post_encrypted("/api/shop-level/list", {})
 

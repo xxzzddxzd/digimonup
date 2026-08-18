@@ -1,4 +1,4 @@
-"""One-shot maintenance: farm + guild + dungeon + lab/mine/dbox + pvp/qmd/afk.
+"""One-shot maintenance: farm + guild + dungeon/series + lab/mine/dbox + pvp/qmd/afk.
 
 Scheduling is external (crontab hourly). No intimacy-cooldown sleep loop.
 No heartbeat. Session kick (-19006): wait then re-auth and finish once.
@@ -39,6 +39,8 @@ from .shop_care import run_shop_daily_buy
 from .shop_care import SessionKicked as ShopSessionKicked
 from .guild_care import run_guild_auto_care
 from .guild_care import SessionKicked as GuildSessionKicked
+from .series_quest_care import run_series_quest_care
+from .series_quest_care import SessionKicked as SeriesQuestSessionKicked
 
 LogFn = Callable[[str], None]
 
@@ -243,7 +245,7 @@ def run_auto_once(
 ) -> int:
     """Single run (crontab-friendly):
 
-    login -> farm -> shop -> guild -> dungeon -> lab -> mine -> dbox ->
+    login -> farm -> shop -> guild -> dungeon -> series quest -> lab -> mine -> dbox ->
     furnace -> pvp -> qmd(if ready, else skip) -> afk -> exit
 
     No long sleep on intimacy cooldown. On -19006: wait 600s, re-login, finish once.
@@ -351,6 +353,29 @@ def run_auto_once(
                     )
                 except DungeonSessionKicked as dk:
                     raise SessionKicked(dk.where, body=dk.body) from dk
+
+                # recurring Guide quest (9000-9014): advance safe task types.
+                # Lamp/Lava with no ticket is a normal phase skip, not an auto failure.
+                try:
+                    series = run_series_quest_care(session, log=log)
+                    start_task = series.get("start_task") or {}
+                    end_task = series.get("end_task") or {}
+                    _append_result_log(
+                        result_path,
+                        result="series",
+                        detail=(
+                            f"ok={series.get('ok')} "
+                            f"start={start_task.get('key')} "
+                            f"end={end_task.get('key')} "
+                            f"claimed={series.get('claimed_count')} "
+                            f"actions={series.get('action_count')} "
+                            f"stop={series.get('stopped_reason')} "
+                            f"dungeon_no_attempts={series.get('dungeon_no_attempts')}"
+                        ),
+                        log=log,
+                    )
+                except SeriesQuestSessionKicked as sk:
+                    raise SessionKicked(sk.where, body=sk.body) from sk
 
                 # lab / 训练: complete finished run, restart same key, ask camp help
                 try:
