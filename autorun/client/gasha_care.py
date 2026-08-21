@@ -10,8 +10,6 @@ from .session import GameSession
 LogFn = Callable[[str], None]
 
 GASHA_ALIASES = {
-    "1": gasha_api.GASHA_PARTNER,    # banner 1: partner / supporter
-    "2": gasha_api.GASHA_SP,         # banner 2: sp / holy weapon
     "ga1": gasha_api.GASHA_PARTNER,  # partner / supporter
     "ga2": gasha_api.GASHA_SP,       # sp / holy weapon
 }

@@ -71,38 +71,45 @@ def main() -> int:
             failures.append(f"{argv}: got {code}, want {expect}")
         print(f"[{status}] main.py {' '.join(argv)} -> {code}")
 
-    # 2) banner mapping + pull arithmetic
+    # 2) series shop-spawn banner mapping and config
     cases = {
-        "1": main_mod.gasha_api.GASHA_PARTNER,
-        "2": main_mod.gasha_api.GASHA_SP,
+        "1": "Skill",
+        "2": "Member",
     }
-    for banner, key in cases.items():
-        got = main_mod.GACHA_BANNERS.get(banner)
-        status = "ok" if got == key else "FAIL"
+    for banner, subtype in cases.items():
+        got = main_mod.GACHA_SPAWN_BANNERS.get(banner)
+        status = "ok" if got == subtype else "FAIL"
         if status == "FAIL":
-            failures.append(f"banner {banner}: got {got}, want {key}")
-        print(f"[{status}] GACHA_BANNERS[{banner}] = {got}")
+            failures.append(f"banner {banner}: got {got}, want {subtype}")
+        print(f"[{status}] GACHA_SPAWN_BANNERS[{banner}] = {got}")
+
+    from client.series_quest_care import SPAWN_SHOP
+
+    expected_config = {
+        "Skill": {"shop_key": 12, "goods_type": 51, "cost": 30},
+        "Member": {"shop_key": 112, "goods_type": 52, "cost": 30},
+    }
+    for subtype, want in expected_config.items():
+        cfg = SPAWN_SHOP.get(subtype) or {}
+        for field, value in want.items():
+            got = cfg.get(field)
+            status = "ok" if got == value else "FAIL"
+            if status == "FAIL":
+                failures.append(f"SPAWN_SHOP[{subtype}][{field}]={got}, want {value}")
+            print(f"[{status}] SPAWN_SHOP[{subtype}][{field}] = {got}")
 
     status = "ok" if main_mod.GACHA_PULL_SIZE == 30 else "FAIL"
     if status == "FAIL":
         failures.append(f"GACHA_PULL_SIZE={main_mod.GACHA_PULL_SIZE}")
     print(f"[{status}] GACHA_PULL_SIZE = {main_mod.GACHA_PULL_SIZE}")
 
-    # 3) gasha_care alias resolution still works for legacy aliases
-    from client.gasha_care import GASHA_ALIASES, resolve_key
+    # 3) run_shop_spawn_calls is exposed for the CLI
+    from client.series_quest_care import run_shop_spawn_calls
 
-    for alias, key in (
-        ("1", main_mod.gasha_api.GASHA_PARTNER),
-        ("2", main_mod.gasha_api.GASHA_SP),
-        ("ga1", main_mod.gasha_api.GASHA_PARTNER),
-        ("ga2", main_mod.gasha_api.GASHA_SP),
-    ):
-        got = resolve_key(alias)
-        status = "ok" if got == key else "FAIL"
-        if status == "FAIL":
-            failures.append(f"resolve_key({alias})={got}, want {key}")
-        print(f"[{status}] resolve_key({alias}) = {got}")
-    assert set(GASHA_ALIASES) >= {"1", "2", "ga1", "ga2"}
+    status = "ok" if callable(run_shop_spawn_calls) else "FAIL"
+    if status == "FAIL":
+        failures.append("run_shop_spawn_calls not callable")
+    print(f"[{status}] run_shop_spawn_calls importable")
 
     # 4) help text mentions gacha examples
     import io

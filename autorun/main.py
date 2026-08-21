@@ -34,19 +34,19 @@ from client.dungeon_care import (
 from client.heartbeat import HeartbeatService
 from client.runtime_state import STATE, ui_stage_no
 from client.session import GameSession
+from client.series_quest_care import SPAWN_SHOP, run_shop_spawn_calls
 from client.tui import FarmTUI
-from client.apis import gasha as gasha_api
-from client.gasha_care import GASHA_LABELS, run_gasha
 
 DUMP_PATH = "last_run.json"
 STATS_PATH = "drop_stats.json"
 
-# gacha banner aliases: gacha 1 -> partner, gacha 2 -> sp(holy weapon)
-GACHA_BANNERS = {
-    "1": gasha_api.GASHA_PARTNER,
-    "2": gasha_api.GASHA_SP,
+# gacha banners replicate the series quest shop spawns:
+# gacha 1 -> Spawn:Skill (shop_key=12, goods 51), gacha 2 -> Spawn:Member (112, goods 52)
+GACHA_SPAWN_BANNERS = {
+    "1": "Skill",
+    "2": "Member",
 }
-GACHA_PULL_SIZE = 30  # one multi-pull request = 30 连抽
+GACHA_PULL_SIZE = 30  # one /api/shop/spawn call consumes 30 tickets = 30 连抽
 
 
 def cmd_ts() -> int:
@@ -398,20 +398,21 @@ def cmd_fb(alias: str, *, level: int | None = None) -> int:
 
 
 def cmd_gacha(banner: str, *, count: int | None = None) -> int:
-    """One-shot gacha: gacha 1 (伙伴) / gacha 2 (SP 圣武器)；-c N = N 次 30 连抽."""
+    """Series-style gacha: gacha 1 (技能) / gacha 2 (成员)；-c N = N 次 30 连抽."""
     pulls = 1 if count is None else int(count)
     if pulls < 1:
         print("[-] gacha requires positive count, e.g. python3 main.py gacha 1 -c 2")
         return 2
     banner_key = str(banner).strip()
-    if banner_key not in GACHA_BANNERS:
+    if banner_key not in GACHA_SPAWN_BANNERS:
         print(
-            "[-] gacha requires banner 1 (伙伴) or 2 (SP圣武器), "
+            "[-] gacha requires banner 1 (技能) or 2 (成员), "
             "e.g. python3 main.py gacha 1 -c 1"
         )
         return 2
-    key = GACHA_BANNERS[banner_key]
-    label = GASHA_LABELS.get(key, str(key))
+    subtype = GACHA_SPAWN_BANNERS[banner_key]
+    config = SPAWN_SHOP[subtype]
+    label = {"Skill": "技能(skill)", "Member": "成员(member)"}[subtype]
 
     session = _load_session()
     session.client.log_enabled = True
@@ -419,46 +420,35 @@ def cmd_gacha(banner: str, *, count: int | None = None) -> int:
         "ok": False,
         "mode": "gacha",
         "banner": banner_key,
-        "key": key,
-        "label": label,
+        "subtype": subtype,
+        "shop_key": config["shop_key"],
+        "goods_type": config["goods_type"],
         "pulls": pulls,
         "pull_size": GACHA_PULL_SIZE,
-        "runs": [],
     }
     try:
         session.run_login_pipeline()
-        print("[+] login pipeline ok")
-        for index in range(pulls):
-            if index > 0:
-                session.ensure_heartbeat()
-            print(f"[*] gacha {label}｜第 {index + 1}/{pulls} 次 {GACHA_PULL_SIZE} 连抽")
-            care = run_gasha(
-                session,
-                key=key,
-                count=GACHA_PULL_SIZE,
-                fetch_infos=(index == 0),
-                log=print,
-            )
-            result["runs"].append(care)
-            if not care.get("ok"):
-                code = care.get("code")
-                message = care.get("message")
-                detail = f"：code={code}" if code is not None else ""
-                if message:
-                    detail += f" message={message}"
-                print(
-                    f"[-] gacha {label} 第 {index + 1} 次失败{detail}",
-                    file=sys.stderr,
-                )
-                break
-        ok_runs = sum(1 for run in result["runs"] if run.get("ok"))
-        rewards = sum(len(run.get("rewards") or []) for run in result["runs"])
-        result["completed"] = ok_runs
-        result["ok"] = bool(result["runs"]) and ok_runs == pulls
+        print(
+            f"[*] gacha {label}｜/api/shop/spawn key={config['shop_key']} "
+            f"(每次消耗 {config['cost']} 票出 {config['count']} 个)"
+        )
+        care = run_shop_spawn_calls(session, subtype=subtype, times=pulls, log=print)
+        result["gacha"] = care
+        result["ok"] = bool(care.get("ok"))
+        completed = int(care.get("completed") or 0)
+        tickets_used = completed * int(care.get("cost_each") or GACHA_PULL_SIZE)
+        result["completed"] = completed
+        result["tickets_used"] = tickets_used
+        stop = care.get("stop_reason")
         print(
             f"[*] gacha summary banner={banner_key}({label}) "
-            f"pulls_ok={ok_runs}/{pulls} rewards={rewards}"
+            f"calls={completed}/{pulls} tickets_used={tickets_used} "
+            f"stock={care.get('stock')}"
+            + (f" stop={stop}" if stop else "")
         )
+        if result["ok"] and completed < pulls:
+            # Ticket shortage truncated the run; not a hard failure.
+            return 0 if completed > 0 else 1
         return 0 if result["ok"] else 1
     except Exception as exc:
         result["error"] = str(exc)
@@ -794,7 +784,7 @@ def main() -> int:
         "command",
         nargs="?",
         choices=("runloop", "auto", "ts", "mine", "zb", "pvp", "fb", "dungeon", "slzt", "gacha"),
-        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场; fb: 副本; dungeon tower: 自动推进今日职业试炼; slzt: 失落之塔; gacha 1/2: 抽卡(伙伴/SP圣武器)",
+        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场; fb: 副本; dungeon tower: 自动推进今日职业试炼; slzt: 失落之塔; gacha 1/2: 抽卡(技能/成员生成)",
     )
     parser.add_argument(
         "--total",
@@ -863,7 +853,7 @@ def main() -> int:
         "fb_key",
         nargs="?",
         default=None,
-        help="fb/dungeon: dungeon alias/key; tower dynamically selects today's trial; gacha: banner 1(伙伴)/2(SP圣武器)",
+        help="fb/dungeon: dungeon alias/key; tower dynamically selects today's trial; gacha: banner 1(技能)/2(成员)",
     )
     parser.add_argument(
         "--key",
@@ -985,8 +975,8 @@ def main() -> int:
     print("  python3 main.py dungeon tower -l 100 -c 10")
     print("  python3 main.py slzt")
     print("  python3 main.py slzt -l 4 -t 2")
-    print("  python3 main.py gacha 1            # 伙伴卡池 1 次 30 连抽")
-    print("  python3 main.py gacha 2 -c 3       # SP 圣武器卡池 3 次 30 连抽")
+    print("  python3 main.py gacha 1            # 技能池 1 次 30 连（30 张技能票）")
+    print("  python3 main.py gacha 2 -c 3       # 成员池 3 次 30 连（90 张成员票）")
     return 2
 
 

@@ -31,7 +31,7 @@ python3 main.py --input 你的抓包.chlsj
 | `python3 main.py dungeon tower [-l N] [-c N]` | 自动识别当天 playList 中 key 6-12（优先职业试炼）并推进；`-l` 指定关卡，`-c` 限制次数 |
 | `python3 main.py slzt` | 从失落之塔当前进度的下一层持续推进，`Ctrl+C` 停止 |
 | `python3 main.py slzt -l 4 -t 2` | 连续清指定层；`-l` 为层数，`-t` 为次数 |
-| `python3 main.py gacha 1` / `gacha 2` | **抽卡**：`1` 伙伴(supporter) 卡池，`2` SP 圣武器卡池；`-c N` 为 N 次 30 连抽（默认 1 次） |
+| `python3 main.py gacha 1` / `gacha 2` | **抽卡**：复刻系列任务的生成动作，`1` 技能池(shop key 12)，`2` 成员池(shop key 112)；`-c N` = N 次 30 连（每次耗 30 票，默认 1 次） |
 
 无参数时打印 help 与示例。需要 `ts` 时请安装依赖：`pip install -r requirements.txt`（含 `textual`）。
 
@@ -98,16 +98,19 @@ slzt 开打后，终端只显示当前层数和当前次数；指定 `-t` 时使
 ### 抽卡 gacha
 
 ```bash
-python3 main.py gacha 1        # 伙伴(supporter) 卡池，1 次 30 连抽
-python3 main.py gacha 2        # SP 圣武器卡池，1 次 30 连抽
-python3 main.py gacha 2 -c 3   # SP 圣武器卡池，3 次 30 连抽（共 90 抽）
+python3 main.py gacha 1        # 技能池，1 次 30 连（消耗 30 张技能票）
+python3 main.py gacha 2        # 成员池，1 次 30 连（消耗 30 张成员票）
+python3 main.py gacha 2 -c 3   # 成员池，3 次 30 连（共 90 票）
 ```
 
-`gacha 1` 对应 `/api/gasha/spawn` 的 `_key=20000`（Supporter/伙伴），
-`gacha 2` 对应 `_key=30000`（HolyWeapon/SP 圣武器）。`-c N` 表示连续
-N 次 30 连抽：每次单独发送一条 `_count=30` 的 `spawn` 请求（与实机客户端
-点击 30 连一致），任意一次失败即停止；多次之间自动续心跳。首次请求前会
-调用 `/api/gasha/list` 打印当前卡池状态。详细结果写入 `last_gacha.json`。
+复刻 `auto` 系列任务里的两个生成动作（`series_quest_care.SPAWN_SHOP`）：
+
+- `gacha 1` = Spawn:Skill → `POST /api/shop/spawn {_key:12}`（技能票 goods 51）
+- `gacha 2` = Spawn:Member → `POST /api/shop/spawn {_key:112}`（成员票 goods 52）
+
+`-c N` 表示连续 N 次 30 连：每次调用一条 spawn 请求、耗 30 票出 35 个，
+多次之间自动续心跳。启动时先从 `/api/goods/list` 读对应票余量，不足 N 次
+时按余量截断并在汇总里标 `stop_reason`。详细结果写入 `last_gacha.json`。
 
 ### 数码世界交互 ts
 

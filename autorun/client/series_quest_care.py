@@ -252,6 +252,66 @@ def _run_shop_spawn(
     return action
 
 
+def run_shop_spawn_calls(
+    session: GameSession,
+    *,
+    subtype: str,
+    times: int,
+    log: LogFn = print,
+) -> dict[str, Any]:
+    """Run N standalone /api/shop/spawn calls for a series shop banner.
+
+    Same action the series quest uses for Spawn:Skill / Spawn:Member.  Each
+    call consumes ``cost`` tickets (30 = one 30-pull) and yields ``count``
+    items.  Stops early when tickets run out or the server rejects a call.
+    """
+    config = SPAWN_SHOP[subtype]
+    stock = _goods_stock(session, config["goods_type"])
+    affordable = stock // config["cost"]
+    planned = min(max(0, int(times)), affordable)
+    action: dict[str, Any] = {
+        "ok": True,
+        "kind": f"Spawn:{subtype}",
+        "shop_key": config["shop_key"],
+        "goods_type": config["goods_type"],
+        "cost_each": config["cost"],
+        "yield_each": config["count"],
+        "stock": stock,
+        "requested": max(0, int(times)),
+        "planned": planned,
+        "completed": 0,
+    }
+    if planned <= 0:
+        action["stop_reason"] = f"{subtype.lower()}_ticket_exhausted"
+        return action
+
+    for index in range(planned):
+        if index > 0:
+            _heartbeat(session)
+        body = shop_api.shop_spawn(session.client, key=config["shop_key"])
+        _raise_if_kick(body, f"shop/spawn key={config['shop_key']}")
+        code = _code(body)
+        if code not in (0, None):
+            action["ok"] = False
+            action["code"] = code
+            action["message"] = (
+                (body.get("_message") or body.get("_details"))
+                if isinstance(body, dict)
+                else None
+            )
+            action["stop_reason"] = f"{subtype.lower()}_spawn_failed"
+            return action
+        action["completed"] += 1
+        log(
+            f"[+] gacha {subtype.lower()} spawn ok "
+            f"{action['completed']}/{planned} key={config['shop_key']}"
+        )
+
+    if planned < int(times):
+        action["stop_reason"] = f"{subtype.lower()}_ticket_exhausted"
+    return action
+
+
 def _heartbeat(session: GameSession) -> None:
     ensure = getattr(session, "ensure_heartbeat", None)
     if callable(ensure):
