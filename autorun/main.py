@@ -35,9 +35,18 @@ from client.heartbeat import HeartbeatService
 from client.runtime_state import STATE, ui_stage_no
 from client.session import GameSession
 from client.tui import FarmTUI
+from client.apis import gasha as gasha_api
+from client.gasha_care import GASHA_LABELS, run_gasha
 
 DUMP_PATH = "last_run.json"
 STATS_PATH = "drop_stats.json"
+
+# gacha banner aliases: gacha 1 -> partner, gacha 2 -> sp(holy weapon)
+GACHA_BANNERS = {
+    "1": gasha_api.GASHA_PARTNER,
+    "2": gasha_api.GASHA_SP,
+}
+GACHA_PULL_SIZE = 30  # one multi-pull request = 30 连抽
 
 
 def cmd_ts() -> int:
@@ -388,6 +397,81 @@ def cmd_fb(alias: str, *, level: int | None = None) -> int:
         print(f"[*] wrote {dump_path}")
 
 
+def cmd_gacha(banner: str, *, count: int | None = None) -> int:
+    """One-shot gacha: gacha 1 (伙伴) / gacha 2 (SP 圣武器)；-c N = N 次 30 连抽."""
+    pulls = 1 if count is None else int(count)
+    if pulls < 1:
+        print("[-] gacha requires positive count, e.g. python3 main.py gacha 1 -c 2")
+        return 2
+    banner_key = str(banner).strip()
+    if banner_key not in GACHA_BANNERS:
+        print(
+            "[-] gacha requires banner 1 (伙伴) or 2 (SP圣武器), "
+            "e.g. python3 main.py gacha 1 -c 1"
+        )
+        return 2
+    key = GACHA_BANNERS[banner_key]
+    label = GASHA_LABELS.get(key, str(key))
+
+    session = _load_session()
+    session.client.log_enabled = True
+    result: dict = {
+        "ok": False,
+        "mode": "gacha",
+        "banner": banner_key,
+        "key": key,
+        "label": label,
+        "pulls": pulls,
+        "pull_size": GACHA_PULL_SIZE,
+        "runs": [],
+    }
+    try:
+        session.run_login_pipeline()
+        print("[+] login pipeline ok")
+        for index in range(pulls):
+            if index > 0:
+                session.ensure_heartbeat()
+            print(f"[*] gacha {label}｜第 {index + 1}/{pulls} 次 {GACHA_PULL_SIZE} 连抽")
+            care = run_gasha(
+                session,
+                key=key,
+                count=GACHA_PULL_SIZE,
+                fetch_infos=(index == 0),
+                log=print,
+            )
+            result["runs"].append(care)
+            if not care.get("ok"):
+                code = care.get("code")
+                message = care.get("message")
+                detail = f"：code={code}" if code is not None else ""
+                if message:
+                    detail += f" message={message}"
+                print(
+                    f"[-] gacha {label} 第 {index + 1} 次失败{detail}",
+                    file=sys.stderr,
+                )
+                break
+        ok_runs = sum(1 for run in result["runs"] if run.get("ok"))
+        rewards = sum(len(run.get("rewards") or []) for run in result["runs"])
+        result["completed"] = ok_runs
+        result["ok"] = bool(result["runs"]) and ok_runs == pulls
+        print(
+            f"[*] gacha summary banner={banner_key}({label}) "
+            f"pulls_ok={ok_runs}/{pulls} rewards={rewards}"
+        )
+        return 0 if result["ok"] else 1
+    except Exception as exc:
+        result["error"] = str(exc)
+        result["trace"] = traceback.format_exc()
+        print("[-] FAILED:", exc)
+        traceback.print_exc()
+        return 1
+    finally:
+        dump_path = Path("last_gacha.json")
+        dump_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[*] wrote {dump_path}")
+
+
 def cmd_dungeon_advance(
     *,
     key: int | str,
@@ -709,8 +793,8 @@ def main() -> int:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("runloop", "auto", "ts", "mine", "zb", "pvp", "fb", "dungeon", "slzt"),
-        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场; fb: 副本; dungeon tower: 自动推进今日职业试炼; slzt: 失落之塔",
+        choices=("runloop", "auto", "ts", "mine", "zb", "pvp", "fb", "dungeon", "slzt", "gacha"),
+        help="runloop: stage farm; auto: hourly maintain; ts: 数码世界; zb: 开装备; pvp: 竞技场; fb: 副本; dungeon tower: 自动推进今日职业试炼; slzt: 失落之塔; gacha 1/2: 抽卡(伙伴/SP圣武器)",
     )
     parser.add_argument(
         "--total",
@@ -731,7 +815,8 @@ def main() -> int:
         default=None,
         help=(
             "runloop: stop after N killed mobs; zb: items per batch; "
-            "dungeon tower: total successful runs (default: infinite)"
+            "dungeon tower: total successful runs (default: infinite); "
+            "gacha: 30 连抽次数 (default 1)"
         ),
     )
     parser.add_argument(
@@ -778,7 +863,7 @@ def main() -> int:
         "fb_key",
         nargs="?",
         default=None,
-        help="fb/dungeon: dungeon alias/key; tower dynamically selects today's trial",
+        help="fb/dungeon: dungeon alias/key; tower dynamically selects today's trial; gacha: banner 1(伙伴)/2(SP圣武器)",
     )
     parser.add_argument(
         "--key",
@@ -825,6 +910,8 @@ def main() -> int:
             print("[-] slzt requires positive times, e.g. python3 main.py slzt -l 4 -t 2")
             return 2
         return cmd_slzt(level=args.level, times=args.times)
+    if args.command == "gacha":
+        return cmd_gacha(args.fb_key if args.fb_key is not None else "", count=args.count)
     if args.command in ("fb", "dungeon"):
         alias = args.fb_key if args.fb_key is not None else (str(args.key) if args.key is not None else None)
         if alias is None:
@@ -898,6 +985,8 @@ def main() -> int:
     print("  python3 main.py dungeon tower -l 100 -c 10")
     print("  python3 main.py slzt")
     print("  python3 main.py slzt -l 4 -t 2")
+    print("  python3 main.py gacha 1            # 伙伴卡池 1 次 30 连抽")
+    print("  python3 main.py gacha 2 -c 3       # SP 圣武器卡池 3 次 30 连抽")
     return 2
 
 
