@@ -1303,7 +1303,7 @@ static void *pc_packetSenderDecryptData(void *sender, void *response,
 
 // tp.PS_Auth.SetPaketData(PS_Auth packet, string uid)
 // PSBase.reqData is +0x10; the RequestData field offsets below come from the
-// matching 1.2.4 IL2CPP dump in 124/Cpp2IL (IsilDump mapped from 1.2.3).
+// matching 1.3.0 IL2CPP dump generated from 130/UnityFramework.
 static void (*orig_authSetPaketData)(void *, void *, const void *);
 static void pc_authSetPaketData(void *packet, void *uid, const void *method) {
     orig_authSetPaketData(packet, uid, method);
@@ -1832,7 +1832,7 @@ static void PCHookMessage(Class cls, SEL selector, IMP replacement, IMP *origina
     NSLog(@"#pc  objc hook installed name=%s original=%p", name, *original);
 }
 
-// MARK: - Unity / IL2CPP probes (UnityFramework offsets for 1.2.4)
+// MARK: - Unity / IL2CPP probes (UnityFramework offsets for 1.3.0)
 
 static bool (*orig_jailbreakCheck)(void);
 static bool pc_jailbreakCheck(void) {
@@ -1853,7 +1853,7 @@ static void pc_applicationQuit(int exitCode, const void *method) {
     orig_applicationQuit(exitCode, method);
 }
 
-// Block all local asset-cache wipes (1.2.4). Log caller stacks, never run the
+// Block all local asset-cache wipes (1.3.0). Log caller stacks, never run the
 // original delete path. ClientCacheClear is the main gate; the others are
 // safety nets for direct / alternate entry points.
 static void (*orig_clientCacheClear)(void *, const void *);
@@ -2482,8 +2482,10 @@ static void pc_navMeshSurfaceBuildNavMesh(void *surface, const void *method) {
 // Mark that synchronous call path so UIItemSelect instances opened elsewhere
 // keep their normal manual behaviour.
 //
-// PS_ItemEquip.Response normally resumes SpawnItem immediately.  For tweak
-// replacements, hold that resume until the response's authoritative
+// PS_ItemEquip.Response normally resumes UIItemSpawnerInfo.Spawn immediately.
+// In 1.3.0 this public no-argument wrapper selects normal versus super spawn
+// and then forwards the calculated count to the private SpawnItem(int).  For
+// tweak replacements, hold that resume until the response's authoritative
 // _unEquipUID has been sold through PS_ItemSell.Request.  This preserves the
 // game's own equip/sell data refresh while preventing auto-spawn from getting
 // stuck behind the unequipped item.
@@ -2494,7 +2496,7 @@ static bool (*orig_itemSpawnerResultMoveNext)(void *, const void *);
 static void (*orig_itemSelectSetData)(void *, void *, int32_t, void *, const void *);
 static void (*orig_itemEquipResponse)(void *, const void *);
 static void (*orig_itemSellResponse)(void *, const void *);
-static void (*orig_itemSpawnerSpawnItem)(void *, const void *);
+static void (*orig_itemSpawnerSpawn)(void *, const void *);
 static int32_t (*gItemInfoGetType)(void *, const void *);
 static void *(*gItemInfoGetStringUID)(void *, const void *);
 static void (*gItemEquipRequest)(int32_t, void *, bool, const void *);
@@ -2506,7 +2508,7 @@ static bool gItemSpawnerSellPending;
 static char gItemSpawnerOldUID[128];
 
 static void PCItemSpawnerResume(void *spawner, const char *reason) {
-    if (!spawner || !orig_itemSpawnerSpawnItem) {
+    if (!spawner || !orig_itemSpawnerSpawn) {
         NSLog(@"#pc  ItemSpawner.AutoReplace resume skipped spawner=%p "
               "reason=%s missing_target=1",
               spawner, reason ?: "(unknown)");
@@ -2534,7 +2536,7 @@ static void PCItemSpawnerResume(void *spawner, const char *reason) {
     NSLog(@"#pc  ItemSpawner.AutoReplace resume spawner=%p reason=%s",
           spawner, reason ?: "(unknown)");
     try {
-        orig_itemSpawnerSpawnItem(spawner, nullptr);
+        orig_itemSpawnerSpawn(spawner, nullptr);
     } catch (...) {
         // This call is initiated by the tweak rather than a managed caller, so
         // contain any stale-scene exception instead of letting it terminate.
@@ -2616,17 +2618,17 @@ static void pc_itemSelectSetData(void *instance, void *info, int32_t openType,
     gItemSelectClose(instance, nullptr);
 }
 
-static void pc_itemSpawnerSpawnItem(void *instance, const void *method) {
+static void pc_itemSpawnerSpawn(void *instance, const void *method) {
     if (gItemSpawnerEquipPending && gItemEquipResponseDepth > 0) {
         if (!gItemSpawnerReplacementInstance) {
             gItemSpawnerReplacementInstance = instance;
         }
-        NSLog(@"#pc  ItemSpawner.AutoReplace hold SpawnItem instance=%p "
+        NSLog(@"#pc  ItemSpawner.AutoReplace hold Spawn instance=%p "
               "until=old_item_sell",
               instance);
         return;
     }
-    orig_itemSpawnerSpawnItem(instance, method);
+    orig_itemSpawnerSpawn(instance, method);
 }
 
 static void pc_itemEquipResponse(void *response, const void *method) {
@@ -3247,283 +3249,283 @@ static void PCInstallUnityHooks(intptr_t slide) {
 
     // UIItemSpawnerInfo.<OnResponseSpawn>b__0: force its 1.7s/0.9s
     // auto-open delay selection to a single 0.5s value.
-    PCPatchInstruction(slide, 0x2FF5950, 0x1E20CC20, 0x1E2C1000,
+    PCPatchInstruction(slide, 0x35269DC, 0x1E20CC28, 0x1E2C1008,
                        "UIItemSpawnerInfo.auto_open_delay_0.5s");
 
     gQuestInfoIsComplete =
-        (bool (*)(void *, const void *))(slide + 0x2DEFF4C);
+        (bool (*)(void *, const void *))(slide + 0x3312720);
     gQuestInfoIsGetReward =
-        (bool (*)(void *, const void *))(slide + 0x2DF0044);
+        (bool (*)(void *, const void *))(slide + 0x331283C);
     gQuestInfoGetKey =
-        (int32_t (*)(void *, const void *))(slide + 0x2DF0C70);
+        (int32_t (*)(void *, const void *))(slide + 0x33134E4);
     gQuestCompleteRequest =
-        (void (*)(void *, const void *))(slide + 0x2F09768);
+        (void (*)(void *, const void *))(slide + 0x3431E6C);
     gGameObjectSetActive =
-        (void (*)(void *, bool, const void *))(slide + 0x6A6A1DC);
+        (void (*)(void *, bool, const void *))(slide + 0x6FB6FB8);
     gUILoginStartLoginRequest =
-        (void (*)(void *, int32_t, const void *))(slide + 0x32990A8);
+        (void (*)(void *, int32_t, const void *))(slide + 0x37A53E8);
     gUnityObjectImplicit =
-        (bool (*)(void *, const void *))(slide + 0x6A72514);
+        (bool (*)(void *, const void *))(slide + 0x6FBF2F0);
     gUnityObjectDestroy =
-        (void (*)(void *, const void *))(slide + 0x6A73E84);
+        (void (*)(void *, const void *))(slide + 0x6FC0C60);
     gComponentGetGameObject =
-        (void *(*)(void *, const void *))(slide + 0x6A639F8);
+        (void *(*)(void *, const void *))(slide + 0x6FB07D4);
     gGameObjectGetActiveInHierarchy =
-        (bool (*)(void *, const void *))(slide + 0x6A6A3E0);
+        (bool (*)(void *, const void *))(slide + 0x6FB71BC);
     gItemInfoGetType =
-        (int32_t (*)(void *, const void *))(slide + 0x2DB7FE0);
+        (int32_t (*)(void *, const void *))(slide + 0x32DAFD4);
     gItemInfoGetStringUID =
-        (void *(*)(void *, const void *))(slide + 0x2DB7F8C);
+        (void *(*)(void *, const void *))(slide + 0x32DAF9C);
     gItemEquipRequest =
-        (void (*)(int32_t, void *, bool, const void *))(slide + 0x2EE3768);
+        (void (*)(int32_t, void *, bool, const void *))(slide + 0x340BCCC);
     gItemSellRequest =
-        (void (*)(void *, const void *))(slide + 0x2EE4370);
+        (void (*)(void *, const void *))(slide + 0x340C8D4);
     gItemSelectClose =
-        (void (*)(void *, const void *))(slide + 0x2FEE490);
+        (void (*)(void *, const void *))(slide + 0x351D868);
     gMainSceneTouchRelationEmoji =
-        (bool (*)(void *, const void *))(slide + 0x31C935C);
+        (bool (*)(void *, const void *))(slide + 0x36F95AC);
     gGameInfoPlayDungeon =
         (void (*)(void *, int32_t, int32_t, int32_t, const void *))
-            (slide + 0x2DABB80);
+            (slide + 0x32CDD20);
     gMineRowItemEnableMove =
-        (void (*)(void *, bool, const void *))(slide + 0x30B8F08);
+        (void (*)(void *, bool, const void *))(slide + 0x35EDD28);
     gMineRowItemRequestMoveCell =
-        (bool (*)(void *, const void *))(slide + 0x30B9114);
+        (bool (*)(void *, const void *))(slide + 0x35EDF34);
     gMineRowItemRequestDrill =
-        (bool (*)(void *, const void *))(slide + 0x30B95D4);
+        (bool (*)(void *, const void *))(slide + 0x35EE3F4);
     gMineCellInfoGetCol =
-        (int32_t (*)(void *, const void *))(slide + 0x2DC2664);
+        (int32_t (*)(void *, const void *))(slide + 0x32E5310);
     gMineCellInfoGetRow =
-        (int32_t (*)(void *, const void *))(slide + 0x2DC26AC);
+        (int32_t (*)(void *, const void *))(slide + 0x32E5358);
     gMineCellInfoGetType =
-        (int32_t (*)(void *, const void *))(slide + 0x2DC26F4);
+        (int32_t (*)(void *, const void *))(slide + 0x32E53A0);
     gMineScrollViewGetCellItem =
         (void *(*)(void *, int32_t, int32_t, const void *))
-            (slide + 0x30B576C);
+            (slide + 0x35EC7F0);
     gMineInfosRequest =
-        (void (*)(const void *))(slide + 0x2EF74B4);
+        (void (*)(const void *))(slide + 0x341FBB8);
     gUIGardenMineSetData =
-        (void (*)(void *, bool, const void *))(slide + 0x30B32A4);
+        (void (*)(void *, bool, const void *))(slide + 0x35E9694);
     gMineInfoGetCol =
-        (int32_t (*)(void *, const void *))(slide + 0x2DC2B58);
+        (int32_t (*)(void *, const void *))(slide + 0x32E5804);
     gMineInfoGetRow =
-        (int32_t (*)(void *, const void *))(slide + 0x2DC2B98);
+        (int32_t (*)(void *, const void *))(slide + 0x32E5844);
     gMineInfoGetDistance =
-        (int32_t (*)(void *, const void *))(slide + 0x2DC2BD8);
+        (int32_t (*)(void *, const void *))(slide + 0x32E5884);
     gUIContentsSceneCloseGrowthGuide =
-        (void (*)(void *, const void *))(slide + 0x31C5308);
+        (void (*)(void *, const void *))(slide + 0x36F5588);
     gBattleInfoParamClientGetStage =
-        (int32_t (*)(void *, const void *))(slide + 0x2D7D5F0);
+        (int32_t (*)(void *, const void *))(slide + 0x329F4B0);
     gBattleInfoParamClientGetSector =
-        (int32_t (*)(void *, const void *))(slide + 0x2D7D60C);
+        (int32_t (*)(void *, const void *))(slide + 0x329F4CC);
     gBattleInfoParamClientGetRepeat =
-        (int32_t (*)(void *, const void *))(slide + 0x2D7D5B8);
+        (int32_t (*)(void *, const void *))(slide + 0x329F478);
     gBattleInfoParamClientGetBattleState =
-        (int32_t (*)(void *, const void *))(slide + 0x2D7D52C);
+        (int32_t (*)(void *, const void *))(slide + 0x329F3EC);
     gBattleInfoParamClientSetBattleState =
-        (void (*)(void *, int32_t, const void *))(slide + 0x2D7D548);
+        (void (*)(void *, int32_t, const void *))(slide + 0x329F408);
     gBattleInfoParamClientGetReason =
-        (int32_t (*)(void *, const void *))(slide + 0x2D7D564);
+        (int32_t (*)(void *, const void *))(slide + 0x329F424);
     gBattleInfoParamClientSetReason =
-        (void (*)(void *, int32_t, const void *))(slide + 0x2D7D580);
+        (void (*)(void *, int32_t, const void *))(slide + 0x329F440);
     gBattleInfoParamClientGetWave =
-        (int32_t (*)(void *, const void *))(slide + 0x2D7D628);
+        (int32_t (*)(void *, const void *))(slide + 0x329F4E8);
     gBattleInfoParamClientSetWave =
-        (void (*)(void *, int32_t, const void *))(slide + 0x2D7D644);
+        (void (*)(void *, int32_t, const void *))(slide + 0x329F504);
     gBattleInfoParamClientGetRegion =
-        (void *(*)(void *, const void *))(slide + 0x2D7E624);
+        (void *(*)(void *, const void *))(slide + 0x32A04DC);
     gDataInfoRegionGetStage =
-        (void *(*)(void *, int32_t, const void *))(slide + 0x2E0F354);
+        (void *(*)(void *, int32_t, const void *))(slide + 0x3333660);
     gDataInfoStageGetSectorCount =
-        (int32_t (*)(void *, const void *))(slide + 0x2E0F240);
+        (int32_t (*)(void *, const void *))(slide + 0x33596B4);
 
-    PCHook((void *)(slide + 0xE51644), (void *)pc_jailbreakCheck,
-           (void **)&orig_jailbreakCheck, "native_jailbreak_check_0xE51644");
-    PCHook((void *)(slide + 0x32C7378), (void *)pc_globalQuit,
-           (void **)&orig_globalQuit, "GlobalObject.Quit_0x32C7378");
-    PCHook((void *)(slide + 0x69D342C), (void *)pc_applicationQuit,
-           (void **)&orig_applicationQuit, "Application.Quit_0x69D342C");
+    PCHook((void *)(slide + 0xE51C04), (void *)pc_jailbreakCheck,
+           (void **)&orig_jailbreakCheck, "native_jailbreak_check_0xE51C04");
+    PCHook((void *)(slide + 0x380A330), (void *)pc_globalQuit,
+           (void **)&orig_globalQuit, "GlobalObject.Quit_0x380A330");
+    PCHook((void *)(slide + 0x6F200F0), (void *)pc_applicationQuit,
+           (void **)&orig_applicationQuit, "Application.Quit_0x6F200F0");
 
-    // Never allow local game-data / Addressables cache wipes on 1.2.4.
-    PCHook((void *)(slide + 0x328C130), (void *)pc_clientCacheClear,
+    // Never allow local game-data / Addressables cache wipes on 1.3.0.
+    PCHook((void *)(slide + 0x37E3BD4), (void *)pc_clientCacheClear,
            (void **)&orig_clientCacheClear,
-           "DataUtil.ClientCacheClear_block_0x328C130");
-    PCHook((void *)(slide + 0x2CFFA14), (void *)pc_clearCacheByKeywords,
+           "DataUtil.ClientCacheClear_block_0x37E3BD4");
+    PCHook((void *)(slide + 0x3220D8C), (void *)pc_clearCacheByKeywords,
            (void **)&orig_clearCacheByKeywords,
-           "SelectiveCacheCleaner.ClearCacheByKeywords_block_0x2CFFA14");
-    PCHook((void *)(slide + 0x2CFFEFC), (void *)pc_listAllCachedFiles,
+           "SelectiveCacheCleaner.ClearCacheByKeywords_block_0x3220D8C");
+    PCHook((void *)(slide + 0x3221274), (void *)pc_listAllCachedFiles,
            (void **)&orig_listAllCachedFiles,
-           "SelectiveCacheCleaner.ListAllCachedFiles_log_0x2CFFEFC");
-    PCHook((void *)(slide + 0x2CFDAC4), (void *)pc_clearOldCache,
+           "SelectiveCacheCleaner.ListAllCachedFiles_log_0x3221274");
+    PCHook((void *)(slide + 0x321EE3C), (void *)pc_clearOldCache,
            (void **)&orig_clearOldCache,
-           "CacheCleaner.ClearOldCache_block_0x2CFDAC4");
-    PCHook((void *)(slide + 0x328C9F0), (void *)pc_deleteAssetBundleCache,
+           "CacheCleaner.ClearOldCache_block_0x321EE3C");
+    PCHook((void *)(slide + 0x37E4494), (void *)pc_deleteAssetBundleCache,
            (void **)&orig_deleteAssetBundleCache,
-           "DataUtil.DeleteAssetBundleCache_block_0x328C9F0");
-    PCHook((void *)(slide + 0x2F3082C), (void *)pc_cancelResourceDownload,
+           "DataUtil.DeleteAssetBundleCache_block_0x37E4494");
+    PCHook((void *)(slide + 0x3458FA0), (void *)pc_cancelResourceDownload,
            (void **)&orig_cancelResourceDownload,
-           "UILoginMessageBox.CancelResourceDownload_block_0x2F3082C");
-    PCHook((void *)(slide + 0x2F3092C), (void *)pc_uiLoginMessageBoxOnAppQuit,
+           "UILoginMessageBox.CancelResourceDownload_block_0x3458FA0");
+    PCHook((void *)(slide + 0x34590A0), (void *)pc_uiLoginMessageBoxOnAppQuit,
            (void **)&orig_uiLoginMessageBoxOnAppQuit,
-           "UILoginMessageBox.OnApplicationQuit_block_0x2F3092C");
-    PCHook((void *)(slide + 0x69D6B7C), (void *)pc_cachingClearCache0,
+           "UILoginMessageBox.OnApplicationQuit_block_0x34590A0");
+    PCHook((void *)(slide + 0x6F23840), (void *)pc_cachingClearCache0,
            (void **)&orig_cachingClearCache0,
-           "Caching.ClearCache_block_0x69D6B7C");
-    PCHook((void *)(slide + 0x69D6BBC), (void *)pc_cachingClearCacheInt,
+           "Caching.ClearCache_block_0x6F23840");
+    PCHook((void *)(slide + 0x6F23880), (void *)pc_cachingClearCacheInt,
            (void **)&orig_cachingClearCacheInt,
-           "Caching.ClearCache_int_block_0x69D6BBC");
-    PCHook((void *)(slide + 0x32CA4F0), (void *)pc_obscuredCheater,
-           (void **)&orig_obscuredCheater, "OnObscuredCheaterDetected_0x32CA4F0");
-    PCHook((void *)(slide + 0x32CA820), (void *)pc_speedCheater,
-           (void **)&orig_speedCheater, "OnSpeedCheaterDetected_0x32CA820");
-    PCHook((void *)(slide + 0x32CABBC), (void *)pc_timeCheater,
-           (void **)&orig_timeCheater, "OnTimeCheaterDetected_0x32CABBC");
-    PCHook((void *)(slide + 0x329017C), (void *)pc_banProcess,
-           (void **)&orig_banProcess, "LoginScene.BanProcess_0x329017C");
-    PCHook((void *)(slide + 0x3290368), (void *)pc_banPopupProcess,
-           (void **)&orig_banPopupProcess, "LoginScene.BanPopupProcess_0x3290368");
-    PCHook((void *)(slide + 0x2E7AC80), (void *)pc_banInfoRequest,
-           (void **)&orig_banInfoRequest, "PS_BanInfo.Request_0x2E7AC80");
-    PCHook((void *)(slide + 0x2E7B618), (void *)pc_integrityRequest,
-           (void **)&orig_integrityRequest, "PS_Integrity.Request_0x2E7B618");
-    PCHook((void *)(slide + 0x2E7B864), (void *)pc_integrityError,
-           (void **)&orig_integrityError, "PS_Integrity.OnErrorCallback_0x2E7B864");
-    PCHook((void *)(slide + 0x2DC1208), (void *)pc_timeRewardGetRemainTime,
+           "Caching.ClearCache_int_block_0x6F23880");
+    PCHook((void *)(slide + 0x380DAF8), (void *)pc_obscuredCheater,
+           (void **)&orig_obscuredCheater, "OnObscuredCheaterDetected_0x380DAF8");
+    PCHook((void *)(slide + 0x380DE28), (void *)pc_speedCheater,
+           (void **)&orig_speedCheater, "OnSpeedCheaterDetected_0x380DE28");
+    PCHook((void *)(slide + 0x380E1C4), (void *)pc_timeCheater,
+           (void **)&orig_timeCheater, "OnTimeCheaterDetected_0x380E1C4");
+    PCHook((void *)(slide + 0x379C584), (void *)pc_banProcess,
+           (void **)&orig_banProcess, "LoginScene.BanProcess_0x379C584");
+    PCHook((void *)(slide + 0x379C768), (void *)pc_banPopupProcess,
+           (void **)&orig_banPopupProcess, "LoginScene.BanPopupProcess_0x379C768");
+    PCHook((void *)(slide + 0x339F7C8), (void *)pc_banInfoRequest,
+           (void **)&orig_banInfoRequest, "PS_BanInfo.Request_0x339F7C8");
+    PCHook((void *)(slide + 0x33A0160), (void *)pc_integrityRequest,
+           (void **)&orig_integrityRequest, "PS_Integrity.Request_0x33A0160");
+    PCHook((void *)(slide + 0x33A03AC), (void *)pc_integrityError,
+           (void **)&orig_integrityError, "PS_Integrity.OnErrorCallback_0x33A03AC");
+    PCHook((void *)(slide + 0x32E3EE0), (void *)pc_timeRewardGetRemainTime,
            (void **)&orig_timeRewardGetRemainTime,
-           "TimeRewardListParam.GetRemainTime_AdRemove_0x2DC1208");
-    PCHook((void *)(slide + 0x2CF0D2C), (void *)pc_setEncryptPublicKey,
+           "TimeRewardListParam.GetRemainTime_AdRemove_0x32E3EE0");
+    PCHook((void *)(slide + 0x32120A8), (void *)pc_setEncryptPublicKey,
            (void **)&orig_setEncryptPublicKey,
-           "PacketManager.SetEncryptPublicKey_capture_crypto_0x2CF0D2C");
-    PCHook((void *)(slide + 0x2CF0E18), (void *)pc_getEncryptData,
+           "PacketManager.SetEncryptPublicKey_capture_crypto_0x32120A8");
+    PCHook((void *)(slide + 0x3212194), (void *)pc_getEncryptData,
            (void **)&orig_getEncryptData,
-           "PacketManager.GetEncryptData_capture_plain_0x2CF0E18");
-    PCHook((void *)(slide + 0x2CF101C), (void *)pc_getDecryptData,
+           "PacketManager.GetEncryptData_capture_plain_0x3212194");
+    PCHook((void *)(slide + 0x3212398), (void *)pc_getDecryptData,
            (void **)&orig_getDecryptData,
-           "PacketManager.GetDecryptData_capture_plain_0x2CF101C");
-    PCHook((void *)(slide + 0x2CF4874), (void *)pc_packetSenderEncryptData,
+           "PacketManager.GetDecryptData_capture_plain_0x3212398");
+    PCHook((void *)(slide + 0x3215BF0), (void *)pc_packetSenderEncryptData,
            (void **)&orig_packetSenderEncryptData,
-           "PacketSender.EncryptData_capture_plain_0x2CF4874");
-    PCHook((void *)(slide + 0x2CF4A20), (void *)pc_packetSenderDecryptData,
+           "PacketSender.EncryptData_capture_plain_0x3215BF0");
+    PCHook((void *)(slide + 0x3215D9C), (void *)pc_packetSenderDecryptData,
            (void **)&orig_packetSenderDecryptData,
-           "PacketSender.DecryptData_capture_plain_0x2CF4A20");
-    PCHook((void *)(slide + 0x2EEB9B4), (void *)pc_authSetPaketData,
+           "PacketSender.DecryptData_capture_plain_0x3215D9C");
+    PCHook((void *)(slide + 0x3413F18), (void *)pc_authSetPaketData,
            (void **)&orig_authSetPaketData,
-           "PS_Auth.SetPaketData_capture_login_0x2EEB9B4");
-    PCHook((void *)(slide + 0x2EEC5B0), (void *)pc_authResponse,
+           "PS_Auth.SetPaketData_capture_login_0x3413F18");
+    PCHook((void *)(slide + 0x3414B14), (void *)pc_authResponse,
            (void **)&orig_authResponse,
-           "PS_Auth.ResponseData.Response_capture_client_0x2EEC5B0");
-    PCHook((void *)(slide + 0x2EEED2C), (void *)pc_loginResponse,
+           "PS_Auth.ResponseData.Response_capture_client_0x3414B14");
+    PCHook((void *)(slide + 0x3417290), (void *)pc_loginResponse,
            (void **)&orig_loginResponse,
-           "LoginResponseData.Response_capture_server_0x2EEED2C");
-    PCHook((void *)(slide + 0x3298BB8), (void *)pc_uiLoginShowStartButton,
+           "LoginResponseData.Response_capture_server_0x3417290");
+    PCHook((void *)(slide + 0x37A4EF8), (void *)pc_uiLoginShowStartButton,
            (void **)&orig_uiLoginShowStartButton,
-           "UILogin.ShowStartButton_auto_start_0x3298BB8");
-    PCHook((void *)(slide + 0x2F38B48), (void *)pc_openNoticeMoveNext,
+           "UILogin.ShowStartButton_auto_start_0x37A4EF8");
+    PCHook((void *)(slide + 0x34612BC), (void *)pc_openNoticeMoveNext,
            (void **)&orig_openNoticeMoveNext,
-           "MainScene.OpenNotice.MoveNext_skip_0x2F38B48");
-    PCHook((void *)(slide + 0x2F38708), (void *)pc_openLoginBonusMoveNext,
+           "MainScene.OpenNotice.MoveNext_skip_0x34612BC");
+    PCHook((void *)(slide + 0x3460E7C), (void *)pc_openLoginBonusMoveNext,
            (void **)&orig_openLoginBonusMoveNext,
-           "MainScene.OpenLoginBonus.MoveNext_skip_0x2F38708");
-    PCHook((void *)(slide + 0x2F3772C), (void *)pc_openAFKMoveNext,
+           "MainScene.OpenLoginBonus.MoveNext_skip_0x3460E7C");
+    PCHook((void *)(slide + 0x345FEA0), (void *)pc_openAFKMoveNext,
            (void **)&orig_openAFKMoveNext,
-           "MainScene.OpenAFK.MoveNext_skip_0x2F3772C");
-    PCHook((void *)(slide + 0x2F39290), (void *)pc_openTimeDealMoveNext,
+           "MainScene.OpenAFK.MoveNext_skip_0x345FEA0");
+    PCHook((void *)(slide + 0x3461A04), (void *)pc_openTimeDealMoveNext,
            (void **)&orig_openTimeDealMoveNext,
-           "MainScene.OpenTimeDeal.MoveNext_skip_0x2F39290");
-    PCHook((void *)(slide + 0x3239CDC), (void *)pc_popupRewardOnBack,
+           "MainScene.OpenTimeDeal.MoveNext_skip_0x3461A04");
+    PCHook((void *)(slide + 0x3766878), (void *)pc_popupRewardOnBack,
            (void **)&orig_popupRewardOnBack,
-           "UIPopupReward.OnBack_auto_close_0x3239CDC");
-    PCHook((void *)(slide + 0x323A10C), (void *)pc_popupRewardShowComplete,
+           "UIPopupReward.OnBack_auto_close_0x3766878");
+    PCHook((void *)(slide + 0x3766CA8), (void *)pc_popupRewardShowComplete,
            (void **)&orig_popupRewardShowComplete,
-           "UIPopupReward.ShowCompete_auto_close_0x323A10C");
-    PCHook((void *)(slide + 0x5E62A34),
+           "UIPopupReward.ShowCompete_auto_close_0x3766CA8");
+    PCHook((void *)(slide + 0x63AF6A0),
            (void *)pc_navMeshSurfaceBuildNavMesh,
            (void **)&orig_navMeshSurfaceBuildNavMesh,
-           "NavMeshSurface.BuildNavMesh_destroy_replaced_data_0x5E62A34");
-    PCHook((void *)(slide + 0x2FF5BB4), (void *)pc_itemSpawnerResultMoveNext,
+           "NavMeshSurface.BuildNavMesh_destroy_replaced_data_0x63AF6A0");
+    PCHook((void *)(slide + 0x3526E2C), (void *)pc_itemSpawnerResultMoveNext,
            (void **)&orig_itemSpawnerResultMoveNext,
-           "UIItemSpawnerInfo.C_Result.MoveNext_auto_equip_0x2FF5BB4");
-    PCHook((void *)(slide + 0x2FED26C), (void *)pc_itemSelectSetData,
+           "UIItemSpawnerInfo.C_Result.MoveNext_auto_equip_0x3526E2C");
+    PCHook((void *)(slide + 0x351C644), (void *)pc_itemSelectSetData,
            (void **)&orig_itemSelectSetData,
-           "UIItemSelect.SetData_item_spawner_auto_equip_0x2FED26C");
-    PCHook((void *)(slide + 0x2EE3AE8), (void *)pc_itemEquipResponse,
+           "UIItemSelect.SetData_item_spawner_auto_equip_0x351C644");
+    PCHook((void *)(slide + 0x340C04C), (void *)pc_itemEquipResponse,
            (void **)&orig_itemEquipResponse,
-           "PS_ItemEquip.ResponseData.Response_sell_old_0x2EE3AE8");
-    PCHook((void *)(slide + 0x2EE49E8), (void *)pc_itemSellResponse,
+           "PS_ItemEquip.ResponseData.Response_sell_old_0x340C04C");
+    PCHook((void *)(slide + 0x340CF4C), (void *)pc_itemSellResponse,
            (void **)&orig_itemSellResponse,
-           "PS_ItemSell.ResponseData.Response_resume_spawn_0x2EE49E8");
-    PCHook((void *)(slide + 0x2FF1B4C), (void *)pc_itemSpawnerSpawnItem,
-           (void **)&orig_itemSpawnerSpawnItem,
-           "UIItemSpawnerInfo.SpawnItem_wait_old_sell_0x2FF1B4C");
-    PCHook((void *)(slide + 0x2DB1610),
+           "PS_ItemSell.ResponseData.Response_resume_spawn_0x340CF4C");
+    PCHook((void *)(slide + 0x352158C), (void *)pc_itemSpawnerSpawn,
+           (void **)&orig_itemSpawnerSpawn,
+           "UIItemSpawnerInfo.Spawn_wait_old_sell_0x352158C");
+    PCHook((void *)(slide + 0x32D414C),
            (void *)pc_gameInfoUpdateBattleStart,
            (void **)&orig_gameInfoUpdateBattleStart,
-           "GameInfo.UpdateBattleStart_capture_0x2DB1610");
+           "GameInfo.UpdateBattleStart_capture_0x32D414C");
     // Battle rollback / stage override is temporarily disabled.  The hooks
     // remain in source so the experiment can be restored without reconstructing
     // the call chain.
 #if 0
-    PCHook((void *)(slide + 0x2DAC338),
+    PCHook((void *)(slide + 0x32CE4AC),
            (void *)pc_gameInfoPlayBattle,
            (void **)&orig_gameInfoPlayBattle,
-           "GameInfo.PlayBattle_rollback_root_0x2DAC338");
-    PCHook((void *)(slide + 0x2E8A4D8),
+           "GameInfo.PlayBattle_rollback_root_0x32CE4AC");
+    PCHook((void *)(slide + 0x33B1E34),
            (void *)pc_battleStartStageRequest,
            (void **)&orig_battleStartStageRequest,
-           "PS_BattleStart_Stage.Request_rollback_0x2E8A4D8");
-    PCHook((void *)(slide + 0x2E8D1AC),
+           "PS_BattleStart_Stage.Request_rollback_0x33B1E34");
+    PCHook((void *)(slide + 0x33B53C4),
            (void *)pc_battleEndStageRequest,
            (void **)&orig_battleEndStageRequest,
-           "PS_BattleEnd_Stage.Request_rollback_0x2E8D1AC");
+           "PS_BattleEnd_Stage.Request_rollback_0x33B53C4");
 #endif
-    PCHook((void *)(slide + 0x305F7B0),
+    PCHook((void *)(slide + 0x3595860),
            (void *)pc_firewallStartDungeonMoveNext,
            (void **)&orig_firewallStartDungeonMoveNext,
-           "UIDungeonReady_Firewall.StartDungeon.MoveNext_direct_0x305F7B0");
-    PCHook((void *)(slide + 0x31C8E4C),
+           "UIDungeonReady_Firewall.StartDungeon.MoveNext_direct_0x3595860");
+    PCHook((void *)(slide + 0x36F909C),
            (void *)pc_mainSceneCreateRelationEmoji,
            (void **)&orig_mainSceneCreateRelationEmoji,
-           "UIMainScene.CreateRelationEmoji_auto_care_0x31C8E4C");
-    PCHook((void *)(slide + 0x323C0A0), (void *)pc_guideQuestSetData,
+           "UIMainScene.CreateRelationEmoji_auto_care_0x36F909C");
+    PCHook((void *)(slide + 0x3768C3C), (void *)pc_guideQuestSetData,
            (void **)&orig_guideQuestSetData,
-           "UIGuideQuestInfo.SetData_auto_claim_0x323C0A0");
-    PCHook((void *)(slide + 0x30B8B3C), (void *)pc_mineRowItemSetState,
+           "UIGuideQuestInfo.SetData_auto_claim_0x3768C3C");
+    PCHook((void *)(slide + 0x35ED95C), (void *)pc_mineRowItemSetState,
            (void **)&orig_mineRowItemSetState,
-           "UIGardenMineRowItem.SetState_enable_all_0x30B8B3C");
-    PCHook((void *)(slide + 0x30B9918), (void *)pc_mineRowItemEventClick,
+           "UIGardenMineRowItem.SetState_enable_all_0x35ED95C");
+    PCHook((void *)(slide + 0x35EE738), (void *)pc_mineRowItemEventClick,
            (void **)&orig_mineRowItemEventClick,
-           "UIGardenMineRowItem.Event_Click_direct_move_0x30B9918");
-    PCHook((void *)(slide + 0x30B4BD0), (void *)pc_uiGardenMineMove,
+           "UIGardenMineRowItem.Event_Click_direct_move_0x35EE738");
+    PCHook((void *)(slide + 0x35EA5F8), (void *)pc_uiGardenMineMove,
            (void **)&orig_uiGardenMineMove,
-           "UIGardenMine.Move_refresh_far_target_0x30B4BD0");
-    PCHook((void *)(slide + 0x2EF7634), (void *)pc_mineInfosResponse,
+           "UIGardenMine.Move_refresh_far_target_0x35EA5F8");
+    PCHook((void *)(slide + 0x341FD38), (void *)pc_mineInfosResponse,
            (void **)&orig_mineInfosResponse,
-           "PS_MineInfos.Response_refresh_far_target_0x2EF7634");
-    PCHook((void *)(slide + 0x3147CD0), (void *)pc_battleProcessorStateDefeat,
+           "PS_MineInfos.Response_refresh_far_target_0x341FD38");
+    PCHook((void *)(slide + 0x375E564), (void *)pc_battleProcessorStateDefeat,
            (void **)&orig_battleProcessorStateDefeat,
-           "BattleProcessor.State_Defeat_mark_0x3147CD0");
-    PCHook((void *)(slide + 0x31C4C2C),
+           "BattleProcessor.State_Defeat_mark_0x375E564");
+    PCHook((void *)(slide + 0x36F4DBC),
            (void *)pc_uiContentsSceneShowGrowthGuide,
            (void **)&orig_uiContentsSceneShowGrowthGuide,
-           "UIContentsScene.ShowGrowthGuide_auto_close_failure_0x31C4C2C");
+           "UIContentsScene.ShowGrowthGuide_auto_close_failure_0x36F4DBC");
 
-    PCHook((void *)(slide + 0x69E770C), (void *)pc_unityInternalLog,
-           (void **)&orig_unityInternalLog, "DebugLogHandler.Internal_Log_0x69E770C");
-    PCHook((void *)(slide + 0x69E795C), (void *)pc_unityInternalLogException,
+    PCHook((void *)(slide + 0x6F343D0), (void *)pc_unityInternalLog,
+           (void **)&orig_unityInternalLog, "DebugLogHandler.Internal_Log_0x6F343D0");
+    PCHook((void *)(slide + 0x6F34620), (void *)pc_unityInternalLogException,
            (void **)&orig_unityInternalLogException,
-           "DebugLogHandler.Internal_LogException_0x69E795C");
-    PCHook((void *)(slide + 0x32AF6FC),
+           "DebugLogHandler.Internal_LogException_0x6F34620");
+    PCHook((void *)(slide + 0x37F2050),
            (void *)pc_exceptionManagerUnhandled,
            (void **)&orig_exceptionManagerUnhandled,
-           "ExceptionManager.HandleUnhandledException_0x32AF6FC");
-    PCHook((void *)(slide + 0x6A719D4),
+           "ExceptionManager.HandleUnhandledException_0x37F2050");
+    PCHook((void *)(slide + 0x6FBE7B0),
            (void *)pc_unityUnhandledException,
            (void **)&orig_unityUnhandledException,
-           "Unity.UnhandledExceptionHandler.Handle_0x6A719D4");
-    PCHook((void *)(slide + 0x6A71C04),
+           "Unity.UnhandledExceptionHandler.Handle_0x6FBE7B0");
+    PCHook((void *)(slide + 0x6FBE9E0),
            (void *)pc_unityIOSNativeUnhandledException,
            (void **)&orig_unityIOSNativeUnhandledException,
-           "Unity.iOSNativeUnhandledExceptionHandler_0x6A71C04");
+           "Unity.iOSNativeUnhandledExceptionHandler_0x6FBE9E0");
 }
 
 static void PCImageAdded(const struct mach_header *header, intptr_t slide) {

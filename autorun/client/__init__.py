@@ -1,4 +1,4 @@
-"""DIGIMON UP content-server client (protocol reverse from 1.0.2)."""
+"""DIGIMON UP content-server client with a 1.3.0 runtime profile."""
 from .session import GameSession
 from .http_client import ApiClient
 from .drops import DropStats

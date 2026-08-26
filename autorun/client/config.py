@@ -1,4 +1,4 @@
-"""Defaults taken from Charles capture (iOS 1.0.2)."""
+"""DIGIMON UP 1.3.0 client-profile defaults and account identity settings."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -30,7 +30,7 @@ class AccountConfig:
 @dataclass
 class ClientConfig:
     base_url: str = "https://dm-content.dgup.channel.or.jp"
-    version: str = "1.0.2"
+    version: str = "1.3.0"
     unity_version: str = "6000.3.11f1"
     accept_language: str = "zh-CN,zh-Hans;q=0.9"
     timeout: float = 30.0

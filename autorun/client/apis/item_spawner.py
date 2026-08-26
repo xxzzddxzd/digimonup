@@ -8,7 +8,8 @@ IL2CPP + GameData ItemSpawner:
   POST /api/item-spawner/accel      {"_useCount": int}
   POST /api/item-spawner/accel-ad   {}
   POST /api/item/spawn-and-sell
-      {"_count", "_filterGrade", "_filterMatchCount", "_filterStatTypeList"}
+      {"_count", "_filterGrade", "_filterMatchCount", "_filterStatTypeList",
+       "_isSuper"}
   POST /api/item/change-filter-option
       {"_filterGrade", "_filterMatchCount", "_filterStatTypeList"}
 
@@ -61,12 +62,14 @@ def item_spawn_and_sell(
     filter_grade: int = 0,
     filter_match_count: int = 0,
     filter_stat_type_list: Optional[Sequence[int]] = None,
+    is_super: bool = False,
 ) -> dict:
     body: dict[str, Any] = {
         "_count": int(count),
         "_filterGrade": int(filter_grade),
         "_filterMatchCount": int(filter_match_count),
         "_filterStatTypeList": list(filter_stat_type_list or []),
+        "_isSuper": bool(is_super),
     }
     return client.post_encrypted("/api/item/spawn-and-sell", body)
 
@@ -117,4 +120,3 @@ def item_sell(client: "ApiClient", *, item_uids: list[str] | str) -> dict:
     else:
         uids = [str(u) for u in item_uids if u]
     return client.post_encrypted("/api/item/sell", {"_itemUIDList": uids})
-

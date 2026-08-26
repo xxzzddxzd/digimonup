@@ -58,7 +58,11 @@ class GameSession:
             acc["data_no"] = data_no
             flat = dict(acc)
             for k in ("base_url", "version", "unity_version", "accept_language"):
-                if k in saved:
+                if k in ("version", "unity_version") and hasattr(self.config, k):
+                    # Refresh stale capture metadata when the server rotates
+                    # dataNo; these values describe the supported client build.
+                    flat[k] = getattr(self.config, k)
+                elif k in saved:
                     flat[k] = saved[k]
                 elif hasattr(self.config, k):
                     flat[k] = getattr(self.config, k)

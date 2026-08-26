@@ -80,8 +80,8 @@ def boss_damage_reward(client: "ApiClient", body: dict | None = None) -> dict:
 
 def item_spawn_and_sell(client: "ApiClient", body: dict[str, Any] | None = None, **kwargs) -> dict:
     """Legacy wrapper; prefer item_spawner.item_spawn_and_sell."""
-    if body is None:
-        body = {}
+    body = dict(body or {})
     if kwargs:
         body = {**body, **kwargs}
+    body.setdefault("_isSuper", False)
     return client.post_encrypted("/api/item/spawn-and-sell", body)

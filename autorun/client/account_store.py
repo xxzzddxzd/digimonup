@@ -269,7 +269,13 @@ def apply_account_to_config(config: ClientConfig, data: dict[str, Any]) -> Clien
     for k, v in account_fields.items():
         if hasattr(config.account, k):
             setattr(config.account, k, v)
+    # The checked-in client profile selects the protocol version supported by
+    # this code.  account.json can outlive several app upgrades, so a version
+    # captured by an older install must not silently downgrade request headers.
+    runtime_profile_keys = {"version", "unity_version"}
     for k, v in client_fields.items():
+        if k in runtime_profile_keys:
+            continue
         if hasattr(config, k):
             setattr(config, k, v)
     # data_no also mirrored on ApiClient later via config.account

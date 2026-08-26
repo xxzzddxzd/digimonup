@@ -190,7 +190,9 @@ python3 main.py zb --filter-grade 0 --filter-match 0 --filter-stat ""   # 关闭
 python3 main.py zb -j 2            # 可选：2 线程波次并发
 ```
 
-开装备走 `POST /api/item/spawn-and-sell`。默认筛选对齐实机客户端（2026-08-11 / 1.2.4）：
+开装备走 `POST /api/item/spawn-and-sell`。1.3.0 请求会显式发送
+`_isSuper=false`，保持普通装备生成模式；默认筛选沿用实机客户端
+（2026-08-11 / 1.2.4）的参数：
 
 - `_filterGrade=10`
 - `_filterMatchCount=2`
