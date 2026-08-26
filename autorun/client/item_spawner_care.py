@@ -1,6 +1,6 @@
 """Item spawner / 装备炉.
 
-- CLI `zb`: open equip only (spawn-and-sell, default all current ItemTicket stock)
+- CLI `zb`: super spawn-and-sell in fixed 250-item serial batches
 - `run_item_spawner_care`: furnace maintain for auto (info/add-gold/level-up/complete)
 
 GameData (ItemSpawner[level]):
@@ -16,8 +16,6 @@ Runtime info (_itemSpawner):
 from __future__ import annotations
 
 import json
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -34,8 +32,9 @@ BatchStatusFn = Callable[[int, int, dict[str, Any], Any], None]
 SESSION_KICK = -19006
 GOODS_GOLD = 0  # E_GOODS_TYPE.Gold — 比特 / bit
 GOODS_ITEM_TICKET = 50  # E_GOODS_TYPE.ItemTicket — 装备生成券
+SUPER_SPAWN_COUNT = 250  # 1.3.0 live client super-spawn batch size
 
-# Live client spawn-and-sell filter (device capture 2026-08-11, game 1.2.4).
+# Live client spawn-and-sell filter (device capture 2026-08-26, game 1.3.0).
 # E_STAT: 10=CriticalRate, 20=StunRate, 13=SkillCriticalRate
 DEFAULT_FILTER_GRADE = 10
 DEFAULT_FILTER_MATCH_COUNT = 2
@@ -822,6 +821,7 @@ def fetch_stuck_spawn_body(
         filter_grade=filter_grade,
         filter_match_count=filter_match_count,
         filter_stat_type_list=filter_stat_type_list,
+        is_super=True,
     )
     _raise_if_kick(body, "item/spawn-and-sell count=0")
     return body if isinstance(body, dict) else {}
@@ -901,27 +901,25 @@ def run_spawn_batches(
     *,
     batches: Optional[int] = None,
     total: Optional[int] = None,
-    count: Optional[int] = None,
     item_ticket_start: Optional[int] = None,
     filter_grade: int = DEFAULT_FILTER_GRADE,
     filter_match_count: int = DEFAULT_FILTER_MATCH_COUNT,
     filter_stat_type_list: Optional[list[int]] = None,
-    workers: int = 1,
     auto_equip: bool = True,
     auto_sell: bool = True,
     log: LogFn = print,
     progress: ProgressFn | None = None,
     on_batch: BatchStatusFn | None = None,
 ) -> dict[str, Any]:
-    """Open equip via spawn-and-sell.
+    """Open equipment through 1.3.0 super spawn-and-sell, strictly serially.
 
-    Default: open all ItemTicket stock present at startup.
-    If ``batches`` is set, run that many batches instead (ignores total).
+    Every successful request sends ``_count=250`` and ``_isSuper=true``.
+    Default: open as many complete 250-ticket batches as startup stock allows.
+    If ``batches`` is set, run that many batches instead (ignores total). An
+    explicit ``total`` is rounded up to a complete 250-item batch.
 
     When _isFilterMatched: compare vs equipped; if better equip+sell old, else sell new.
     Stop early on spawn failure.
-    Optional wave concurrency via ``workers`` (>1). Default 1 = serial (original).
-    When workers>1, equip/sell still handled serially.
     """
     if filter_stat_type_list is None:
         filter_stat_type_list = list(DEFAULT_FILTER_STAT_TYPE_LIST)
@@ -939,32 +937,27 @@ def run_spawn_batches(
     result["before"] = summary
     log(f"[*] zb info: {format_upgrade_cost(summary)}")
 
-    batch_count = int(count) if count is not None else int(summary.get("spawn_count") or 8)
-    if batch_count < 1:
-        batch_count = 1
+    batch_count = SUPER_SPAWN_COUNT
     result["batch_count"] = batch_count
+    result["is_super"] = True
 
     if item_ticket_start is None:
         _, item_ticket_start = fetch_item_ticket_stock(session)
     item_ticket_start = max(0, int(item_ticket_start))
     result["item_ticket_start"] = item_ticket_start
 
-    # batches mode vs explicit total vs all startup ItemTicket stock
+    # Super mode only sends complete 250-item batches.
     if batches is not None and int(batches) > 0:
         target_items = int(batches) * batch_count
         max_batches = int(batches)
         mode = "batches"
     elif total is not None and int(total) > 0:
-        target_items = int(total)
-        max_batches = max(1, (target_items + batch_count - 1) // batch_count)
+        max_batches = max(1, (int(total) + batch_count - 1) // batch_count)
+        target_items = max_batches * batch_count
         mode = "total"
     else:
-        target_items = item_ticket_start
-        max_batches = (
-            (target_items + batch_count - 1) // batch_count
-            if target_items > 0
-            else 0
-        )
+        max_batches = item_ticket_start // batch_count
+        target_items = max_batches * batch_count
         mode = "remaining"
     result["mode"] = mode
     result["target_items"] = target_items
@@ -1031,25 +1024,20 @@ def run_spawn_batches(
             log(f"[!] zb load equipped failed: {exc}")
             equipped = {}
 
-    def _do_spawn(n: int | None = None) -> dict:
+    def _do_spawn() -> dict:
         return sp_api.item_spawn_and_sell(
             session.client,
-            count=batch_count if n is None else int(n),
+            count=batch_count,
             filter_grade=filter_grade,
             filter_match_count=filter_match_count,
             filter_stat_type_list=filter_stat_type_list,
+            is_super=True,
         )
-
-    worker_n = max(1, int(workers or 1))
-    result["workers"] = worker_n
-    log(f"[*] zb workers={worker_n}")
 
     items_ok = 0
     ticket_remaining = item_ticket_start
-    equipped_lock = threading.RLock()
     stop = False
     batch_no = 0
-    idle_waves = 0
 
     def _handle_body(batch_no: int, this_count: int, body: Any) -> tuple[dict[str, Any], bool]:
         """Process one spawn response. Returns (run, should_stop)."""
@@ -1062,46 +1050,45 @@ def run_spawn_batches(
                 f"[!] zb -35004 batch={batch_no}: drain stuck queue "
                 "then retry once"
             )
-            with equipped_lock:
-                cleanup_bag_keep_best(session, log=log)
-                try:
-                    stuck = resolve_stuck_spawn_queue(
-                        session,
-                        equipped=equipped,
-                        auto_equip=auto_equip,
-                        auto_sell=auto_sell,
-                        filter_grade=filter_grade,
-                        filter_match_count=filter_match_count,
-                        filter_stat_type_list=filter_stat_type_list,
-                        log=log,
-                    )
-                    result["equip_actions"].append(stuck)
-                except SessionKicked:
-                    raise
-                except Exception as exc:
-                    log(f"[!] zb stuck-queue process failed: {exc}")
-                try:
-                    process_pending_bag_items(
-                        session,
-                        equipped=equipped,
-                        auto_equip=auto_equip,
-                        auto_sell=auto_sell,
-                        log=log,
-                    )
-                except Exception:
-                    pass
-                try:
-                    if hasattr(session, "init_data"):
-                        from .apis import account as acc_api
+            cleanup_bag_keep_best(session, log=log)
+            try:
+                stuck = resolve_stuck_spawn_queue(
+                    session,
+                    equipped=equipped,
+                    auto_equip=auto_equip,
+                    auto_sell=auto_sell,
+                    filter_grade=filter_grade,
+                    filter_match_count=filter_match_count,
+                    filter_stat_type_list=filter_stat_type_list,
+                    log=log,
+                )
+                result["equip_actions"].append(stuck)
+            except SessionKicked:
+                raise
+            except Exception as exc:
+                log(f"[!] zb stuck-queue process failed: {exc}")
+            try:
+                process_pending_bag_items(
+                    session,
+                    equipped=equipped,
+                    auto_equip=auto_equip,
+                    auto_sell=auto_sell,
+                    log=log,
+                )
+            except Exception:
+                pass
+            try:
+                if hasattr(session, "init_data"):
+                    from .apis import account as acc_api
 
-                        session.init_data = acc_api.init_data(session.client)
+                    session.init_data = acc_api.init_data(session.client)
+                equipped = load_equipped_by_type(session)
+            except Exception:
+                try:
                     equipped = load_equipped_by_type(session)
                 except Exception:
-                    try:
-                        equipped = load_equipped_by_type(session)
-                    except Exception:
-                        pass
-            body = _do_spawn(this_count)
+                    pass
+            body = _do_spawn()
             _raise_if_kick(body, "item/spawn-and-sell")
             code = _code(body)
 
@@ -1136,21 +1123,15 @@ def run_spawn_batches(
 
         if code == 0:
             result["batches_ok"] += 1
-            # Prefer live ticket remaining from response. Concurrent waves can
-            # return multiple code=0 while only one batch actually spent stock;
-            # counting requested this_count would fake progress.
+            # A successful super request always completes its full 250-item
+            # batch. Ticket stock can also move because of unrelated rewards,
+            # so it is useful for capacity but not as the progress counter.
             stock = ticket_stock_from_payload(body)
-            opened = 0
+            opened = int(this_count)
             if stock is not None:
-                if stock < ticket_remaining:
-                    opened = ticket_remaining - stock
-                    ticket_remaining = stock
-                else:
-                    opened = 0
-                    run["ticket_unchanged"] = True
+                ticket_remaining = max(0, int(stock))
                 run["ticket_remaining"] = ticket_remaining
             else:
-                opened = max(0, int(this_count))
                 ticket_remaining = max(0, ticket_remaining - opened)
                 run["ticket_remaining"] = ticket_remaining
                 run["ticket_estimated"] = True
@@ -1163,33 +1144,32 @@ def run_spawn_batches(
             log(
                 f"[+] zb spawn ok batch={batch_no} matched={run.get('is_filter_matched')} "
                 f"opened={opened} items={items_ok}/{target_items} "
-                f"ticket_left={ticket_remaining} workers={worker_n}"
+                f"ticket_left={ticket_remaining}"
             )
             if run.get("is_filter_matched") and isinstance(body, dict):
                 try:
-                    with equipped_lock:
-                        actions = process_matched_equips(
-                            session,
-                            body,
-                            equipped=equipped,
-                            auto_equip=auto_equip,
-                            auto_sell=auto_sell,
-                            log=log,
-                        )
-                        run["match_actions"] = {
-                            "equipped_n": len(actions.get("equipped") or []),
-                            "sold_n": len(actions.get("sold") or []),
-                            "worse_n": len(actions.get("kept_worse") or []),
-                            "candidates": actions.get("candidates"),
-                            "sell_code": actions.get("sell_code"),
-                            "errors": actions.get("errors"),
-                        }
-                        result["equip_actions"].append(actions)
-                        if auto_equip:
-                            try:
-                                equipped = load_equipped_by_type(session)
-                            except Exception:
-                                pass
+                    actions = process_matched_equips(
+                        session,
+                        body,
+                        equipped=equipped,
+                        auto_equip=auto_equip,
+                        auto_sell=auto_sell,
+                        log=log,
+                    )
+                    run["match_actions"] = {
+                        "equipped_n": len(actions.get("equipped") or []),
+                        "sold_n": len(actions.get("sold") or []),
+                        "worse_n": len(actions.get("kept_worse") or []),
+                        "candidates": actions.get("candidates"),
+                        "sell_code": actions.get("sell_code"),
+                        "errors": actions.get("errors"),
+                    }
+                    result["equip_actions"].append(actions)
+                    if auto_equip:
+                        try:
+                            equipped = load_equipped_by_type(session)
+                        except Exception:
+                            pass
                 except SessionKicked:
                     raise
                 except Exception as exc:
@@ -1210,97 +1190,23 @@ def run_spawn_batches(
             )
         return run, True
 
-    # Dynamic waves: re-issue until ticket-based progress hits target.
-    # Concurrent code=0 may not spend stock; fixed pre-plan would under-open.
-    while not stop and items_ok < target_items and ticket_remaining > 0:
-        need = target_items - items_ok
-        if need <= 0:
-            break
-        # Upper bound of concurrent requests this wave.
-        slots = max(1, min(worker_n, (need + batch_count - 1) // batch_count))
-        # Don't fire more requests than remaining tickets can support.
-        slots = min(slots, max(1, (ticket_remaining + batch_count - 1) // batch_count))
-        wave: list[tuple[int, int]] = []
-        plan_left = min(need, ticket_remaining)
-        for _ in range(slots):
-            if plan_left <= 0:
-                break
-            batch_no += 1
-            this_count = min(batch_count, plan_left)
-            wave.append((batch_no, this_count))
-            plan_left -= this_count
-        if not wave:
-            break
-
-        if worker_n == 1:
-            wave_results: list[tuple[int, int, Any]] = []
-            for bno, this_count in wave:
-                try:
-                    body = _do_spawn(this_count)
-                except SessionKicked:
-                    raise
-                except Exception as exc:
-                    body = {"_code": -1, "_message": str(exc)}
-                wave_results.append((bno, this_count, body))
-        else:
-            wave_results = []
-            with ThreadPoolExecutor(max_workers=worker_n) as pool:
-                futs = {
-                    pool.submit(_do_spawn, this_count): (bno, this_count)
-                    for bno, this_count in wave
-                }
-                for fut in as_completed(futs):
-                    bno, this_count = futs[fut]
-                    try:
-                        body = fut.result()
-                    except SessionKicked:
-                        stop = True
-                        raise
-                    except Exception as exc:
-                        body = {"_code": -1, "_message": str(exc)}
-                    wave_results.append((bno, this_count, body))
-            wave_results.sort(key=lambda row: row[0])
-
-        before_items = items_ok
-        for bno, this_count, body in wave_results:
-            run, should_stop = _handle_body(bno, this_count, body)
-            result["runs"].append(run)
-            if should_stop:
-                stop = True
-
-        # Hard reconcile: ticket stock is source of truth.
-        if worker_n > 1 and not stop:
-            try:
-                _, live = fetch_item_ticket_stock(session)
-                items_ok = max(0, item_ticket_start - int(live))
-                ticket_remaining = int(live)
-                result["items_ok"] = items_ok
-                result["ticket_remaining"] = ticket_remaining
-                if progress is not None:
-                    progress(items_ok, target_items)
-                log(
-                    f"[*] zb reconcile ticket_left={ticket_remaining} "
-                    f"items_ok={items_ok}/{target_items}"
-                )
-            except Exception as exc:
-                log(f"[!] zb ticket reconcile failed: {exc}")
-
-        gained = items_ok - before_items
-        if gained <= 0:
-            idle_waves += 1
-        else:
-            idle_waves = 0
-        # Two consecutive waves with no ticket movement → give up.
-        if idle_waves >= 2 and items_ok < target_items:
-            result["error"] = (
-                "spawn_no_ticket_progress "
-                f"(workers={worker_n}, idle_waves={idle_waves}); "
-                "server accepted requests but stock did not drop"
+    while not stop and items_ok < target_items:
+        if ticket_remaining < batch_count:
+            result["error"] = "insufficient_item_tickets_for_super_batch"
+            log(
+                f"[!] zb super batch needs {batch_count} tickets; "
+                f"only {ticket_remaining} remain"
             )
-            log(f"[!] zb {result['error']}")
-            stop = True
-        if items_ok >= target_items:
-            stop = True
+            break
+        batch_no += 1
+        try:
+            body = _do_spawn()
+        except SessionKicked:
+            raise
+        except Exception as exc:
+            body = {"_code": -1, "_message": str(exc)}
+        run, stop = _handle_body(batch_no, batch_count, body)
+        result["runs"].append(run)
 
     result["items_ok"] = items_ok
     try:
@@ -1311,20 +1217,8 @@ def run_spawn_batches(
     try:
         _, live_after = fetch_item_ticket_stock(session)
         result["item_ticket_after"] = live_after
-        # Final authority: actual ticket consumption.
-        true_opened = max(0, item_ticket_start - int(live_after))
-        result["items_ok_ticket_delta"] = true_opened
-        if true_opened != items_ok:
-            log(
-                f"[!] zb progress items_ok={items_ok} but ticket_delta={true_opened}; "
-                "using ticket_delta"
-            )
-            items_ok = true_opened
-            result["items_ok"] = items_ok
-            ticket_remaining = int(live_after)
-            result["ticket_remaining"] = ticket_remaining
-            if progress is not None:
-                progress(items_ok, target_items)
+        ticket_remaining = max(0, int(live_after))
+        result["ticket_remaining"] = ticket_remaining
     except Exception as exc:
         result["item_ticket_after_error"] = str(exc)
 
@@ -1522,12 +1416,10 @@ def run_zb(
     *,
     batches: Optional[int] = None,
     total: Optional[int] = None,
-    count: Optional[int] = None,
     info_only: bool = False,
     filter_grade: int = DEFAULT_FILTER_GRADE,
     filter_match_count: int = DEFAULT_FILTER_MATCH_COUNT,
     filter_stat_type_list: Optional[list[int]] = None,
-    workers: int = 1,
     auto_equip: bool = True,
     auto_sell: bool = True,
     log: LogFn = print,
@@ -1536,8 +1428,8 @@ def run_zb(
 ) -> dict[str, Any]:
     """CLI zb: open equip only (spawn-and-sell). Furnace care is auto-only.
 
-    Default opens all ItemTicket stock present at startup.
-    Override with ``total`` or ``batches``.
+    Default opens all complete 250-ticket batches present at startup.
+    Override with ``total`` (rounded up to 250) or ``batches``.
     Filter defaults match the live client capture (grade/match/stat list).
     """
     table = load_spawner_table()
@@ -1580,12 +1472,10 @@ def run_zb(
         session,
         batches=batches,
         total=total,
-        count=count,
         item_ticket_start=item_ticket_start,
         filter_grade=filter_grade,
         filter_match_count=filter_match_count,
         filter_stat_type_list=stats_filter,
-        workers=workers,
         auto_equip=auto_equip,
         auto_sell=auto_sell,
         log=log,

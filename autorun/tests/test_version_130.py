@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from client import item_spawner_care
 from client.account_store import apply_account_to_config
 from client.apis.item_spawner import item_spawn_and_sell
 from client.config import ClientConfig
@@ -55,6 +58,49 @@ class Version130Tests(unittest.TestCase):
                         "_filterMatchCount": 2,
                         "_filterStatTypeList": [10, 20, 13],
                         "_isSuper": False,
+                    },
+                )
+            ],
+        )
+
+    def test_zb_rounds_50_up_to_one_serial_250_super_batch(self) -> None:
+        client = FakeClient()
+        session = SimpleNamespace(client=client)
+
+        with (
+            patch.object(item_spawner_care, "load_spawner_table", return_value={}),
+            patch.object(item_spawner_care, "fetch_info", return_value=({}, {})),
+            patch.object(
+                item_spawner_care,
+                "fetch_item_ticket_stock",
+                return_value=({}, 0),
+            ),
+        ):
+            result = item_spawner_care.run_spawn_batches(
+                session,
+                total=50,
+                item_ticket_start=250,
+                auto_equip=False,
+                auto_sell=False,
+                log=lambda _line: None,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["is_super"])
+        self.assertEqual(result["batch_count"], 250)
+        self.assertEqual(result["target_items"], 250)
+        self.assertEqual(result["items_ok"], 250)
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    "/api/item/spawn-and-sell",
+                    {
+                        "_count": 250,
+                        "_filterGrade": 10,
+                        "_filterMatchCount": 2,
+                        "_filterStatTypeList": [10, 20, 13],
+                        "_isSuper": True,
                     },
                 )
             ],

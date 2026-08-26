@@ -20,6 +20,7 @@ from .dungeon_care import (
 )
 from .farm import _extract_spawn_waves
 from .item_spawner_care import (
+    SUPER_SPAWN_COUNT,
     SessionKicked as ItemSpawnerSessionKicked,
     fetch_item_ticket_stock,
     run_spawn_batches,
@@ -178,20 +179,26 @@ def _run_item_spawn(
     session: GameSession, *, remaining: int, log: LogFn
 ) -> dict[str, Any]:
     _body, stock = fetch_item_ticket_stock(session)
-    planned = min(max(0, int(remaining)), max(0, int(stock)))
-    if planned <= 0:
+    requested = max(0, int(remaining))
+    planned = SUPER_SPAWN_COUNT if requested > 0 and stock >= SUPER_SPAWN_COUNT else 0
+    if planned == 0:
         return {
             "ok": True,
             "kind": "Spawn:Item",
             "attempted": False,
             "stock": stock,
+            "requested": requested,
+            "planned": 0,
             "stop_reason": "item_ticket_exhausted",
         }
+    log(
+        f"[*] series quest item remaining={requested}; "
+        f"run one super batch={SUPER_SPAWN_COUNT}"
+    )
     opened = run_spawn_batches(
         session,
-        total=planned,
+        batches=1,
         item_ticket_start=stock,
-        workers=1,
         auto_equip=True,
         auto_sell=True,
         log=log,
@@ -201,13 +208,12 @@ def _run_item_spawn(
         "kind": "Spawn:Item",
         "attempted": True,
         "stock": stock,
+        "requested": requested,
         "planned": planned,
         "opened": _int(opened.get("items_ok")),
         "batches": _int(opened.get("batches_ok")),
     }
-    if planned < remaining:
-        action["stop_reason"] = "item_ticket_exhausted"
-    elif not action["ok"]:
+    if not action["ok"]:
         action["stop_reason"] = "item_spawn_failed"
     return action
 

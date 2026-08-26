@@ -243,14 +243,12 @@ def cmd_zb(
     *,
     batches: int | None = None,
     total: int | None = None,
-    count: int | None = None,
     info_only: bool = False,
     filter_grade: int = DEFAULT_FILTER_GRADE,
     filter_match: int = DEFAULT_FILTER_MATCH_COUNT,
     filter_stat: list[int] | None = None,
-    workers: int = 1,
 ) -> int:
-    """One-shot 开装备 (default: open all startup ItemTicket stock)."""
+    """One-shot 超级开装备 (fixed 250-item batches, strictly serial)."""
     progress_width = 20
     progress_open = False
     progress_total: int | None = None
@@ -294,7 +292,6 @@ def cmd_zb(
             session,
             batches=0 if info_only else batches,
             total=None if info_only or total is None else int(total),
-            count=count,
             info_only=bool(info_only),
             filter_grade=int(filter_grade),
             filter_match_count=int(filter_match),
@@ -303,7 +300,6 @@ def cmd_zb(
                 if filter_stat is None
                 else list(filter_stat)
             ),
-            workers=max(1, int(workers or 1)),
             log=print if info_only else (lambda _message: None),
             progress=None if info_only else show_progress,
         )
@@ -790,13 +786,13 @@ def main() -> int:
         "--total",
         type=int,
         default=None,
-        help="zb: items to open; default reads all remaining ItemTicket stock",
+        help="zb: items to open, rounded up to 250; default uses all complete 250-ticket batches",
     )
     parser.add_argument(
         "--batches",
         type=int,
         default=None,
-        help="zb: batch times override (if set, ignores --total)",
+        help="zb: number of serial 250-item super batches (overrides --total)",
     )
     parser.add_argument(
         "-c",
@@ -804,7 +800,7 @@ def main() -> int:
         type=int,
         default=None,
         help=(
-            "runloop: stop after N killed mobs; zb: items per batch; "
+            "runloop: stop after N killed mobs; "
             "dungeon tower: total successful runs (default: infinite); "
             "gacha: 30 连抽次数 (default 1)"
         ),
@@ -841,13 +837,6 @@ def main() -> int:
             f"(default {','.join(str(x) for x in DEFAULT_FILTER_STAT_TYPE_LIST)} = "
             "CriticalRate,StunRate,SkillCriticalRate)"
         ),
-    )
-    parser.add_argument(
-        "-j",
-        "--workers",
-        type=int,
-        default=1,
-        help="zb: concurrent spawn-and-sell workers (default 1=serial; progress uses real ticket drop)",
     )
     parser.add_argument(
         "fb_key",
@@ -931,6 +920,9 @@ def main() -> int:
             )
         return cmd_fb(str(alias), level=args.level)
     if args.command == "zb":
+        if args.count is not None:
+            parser.error("zb 超级模式固定每批 250，不支持 --count")
+
         def _parse_filter_stat(raw: str | None) -> list[int]:
             if raw is None:
                 return list(DEFAULT_FILTER_STAT_TYPE_LIST)
@@ -942,12 +934,10 @@ def main() -> int:
         return cmd_zb(
             batches=args.batches,
             total=int(args.total) if args.total is not None else None,
-            count=args.count,
             info_only=bool(args.info),
             filter_grade=int(args.filter_grade),
             filter_match=int(args.filter_match),
             filter_stat=_parse_filter_stat(args.filter_stat),
-            workers=max(1, int(args.workers or 1)),
         )
 
     parser.print_help()
@@ -963,10 +953,8 @@ def main() -> int:
     print("  python3 main.py zb --info")
     print("  python3 main.py zb --total 1000")
     print("  python3 main.py zb --batches 3")
-    print("  python3 main.py zb --count 8 --batches 1")
     print("  python3 main.py zb --filter-grade 10 --filter-match 2 --filter-stat 10,20,13")
     print("  python3 main.py zb --filter-grade 0 --filter-match 0 --filter-stat \"\"")
-    print("  python3 main.py zb -j 2")
     print("  python3 main.py fb 1")
     print("  python3 main.py fb 2 --level 56")
     print("  python3 main.py fb 3")

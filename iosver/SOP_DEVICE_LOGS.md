@@ -52,17 +52,18 @@ cd iosver
 ```bash
 ./pull_logs.sh --grep filterGrade logs/zb-check
 # 或本地
-rg -n 'filterGrade|filterStatTypeList|filterMatchCount' iosver/logs/zb-check/PCJBProbe-current.log | tail
+rg -n 'isSuper|_count|filterGrade|filterStatTypeList|filterMatchCount' iosver/logs/zb-check/PCJBProbe-current.log | tail
 ```
 
-实机 1.2.4 捕获（2026-08-11）：
+实机 1.3.0 捕获（2026-08-26）：
 
 ```json
 {
-  "_count": 10,
+  "_count": 250,
   "_filterGrade": 10,
   "_filterMatchCount": 2,
-  "_filterStatTypeList": [10, 20, 13]
+  "_filterStatTypeList": [10, 20, 13],
+  "_isSuper": true
 }
 ```
 
@@ -71,20 +72,21 @@ rg -n 'filterGrade|filterStatTypeList|filterMatchCount' iosver/logs/zb-check/PCJ
 | `_filterGrade` | 品质门槛（10） |
 | `_filterMatchCount` | 需命中词条数（2） |
 | `_filterStatTypeList` | `E_STAT`：10=CriticalRate，20=StunRate，13=SkillCriticalRate |
+| `_isSuper` | 超级装备生成模式（`true`） |
 
 autorun `zb` 默认已对齐上表，见 `autorun/client/item_spawner_care.py`：
 
 - `DEFAULT_FILTER_GRADE = 10`
 - `DEFAULT_FILTER_MATCH_COUNT = 2`
 - `DEFAULT_FILTER_STAT_TYPE_LIST = [10, 20, 13]`
-- 默认串行；可选 `-j 2` 波次并发
+- 固定 `_count=250`、`_isSuper=true`，严格串行
 
 覆盖示例：
 
 ```bash
 cd autorun
 python3 main.py zb
-python3 main.py zb -j 2
+python3 main.py zb --batches 2
 python3 main.py zb --filter-grade 0 --filter-match 0 --filter-stat ""
 ```
 

@@ -26,7 +26,7 @@ python3 main.py --input 你的抓包.chlsj
 | `python3 main.py auto` | 单次维护：肉田 → 公会 → 副本 → 系列任务 → 训练 → 探查 → 异次元 box → 炉子 → 竞技场 PVP → 亲密点触 → AFK |
 | `python3 main.py pvp` | **竞技场**：常规+赛季，各选战力最低挑战，直到两种票都耗尽 |
 | `python3 main.py ts` | **数码世界 / 探索** Textual 交互 TUI：鼠标点格行走 / 钻头 / 冲锋 / 领里程（`mine` 为别名） |
-| `python3 main.py zb` | **开装备**：读取并开完当前装备生成券；`--info` 看炉子快照 |
+| `python3 main.py zb` | **超级开装备**：按 250 件一批严格串行，开完所有完整批次；`--info` 看炉子快照 |
 | `python3 main.py fb 1` / `fb 2` / `fb 3` | 清一次副本（有通关层优先 sweep；否则 start/end） |
 | `python3 main.py dungeon tower [-l N] [-c N]` | 自动识别当天 playList 中 key 6-12（优先职业试炼）并推进；`-l` 指定关卡，`-c` 限制次数 |
 | `python3 main.py slzt` | 从失落之塔当前进度的下一层持续推进，`Ctrl+C` 停止 |
@@ -36,8 +36,9 @@ python3 main.py --input 你的抓包.chlsj
 无参数时打印 help 与示例。需要 `ts` 时请安装依赖：`pip install -r requirements.txt`（含 `textual`）。
 
 `zb` 开始后从 `/api/goods/list` 读取 `ItemTicket`（goods type 50）的当前
-`_value`，默认将它固定为本次尚需开启的总数量。单行动态进度条显示本次已经
-成功开启的数量；显式指定 `--total` 或 `--batches` 时才覆盖默认总数。
+`_value`，默认按 250 件一个完整批次执行，余数不足 250 时保留。单行动态
+进度条显示本次已经成功开启的数量；`--total` 会向上取整为 250 的倍数，
+`--batches` 则直接指定批次数。
 登录、HTTP、批次日志及结果文件提示静默，详细结果仍保存到 `last_zb.json`。
 `zb --info` 保持原有的炉子信息输出。
 正常未命中筛选的批次只发送 `spawn-and-sell`；`item/list` 仅在启动清理、
@@ -182,22 +183,24 @@ python3 main.py pvp                 # 打完常规票(356) + 赛季票(357)
 ### 开装备 zb
 
 ```bash
-python3 main.py zb              # 开完全部 ItemTicket；默认带客户端筛选参数
-python3 main.py zb --batches 5  # 连续 5 批
+python3 main.py zb              # 串行开完所有完整的 250 券批次
+python3 main.py zb --batches 5  # 串行执行 5 个 250 件超级批次
 python3 main.py zb --info       # 只查炉子快照 / 升级所需 bit（不操作）
 python3 main.py zb --filter-grade 10 --filter-match 2 --filter-stat 10,20,13
 python3 main.py zb --filter-grade 0 --filter-match 0 --filter-stat ""   # 关闭筛选
-python3 main.py zb -j 2            # 可选：2 线程波次并发
 ```
 
 开装备走 `POST /api/item/spawn-and-sell`。1.3.0 请求会显式发送
-`_isSuper=false`，保持普通装备生成模式；默认筛选沿用实机客户端
-（2026-08-11 / 1.2.4）的参数：
+`_count=250` 和 `_isSuper=true`，保持超级装备生成模式；默认筛选沿用
+实机 1.3.0 客户端（2026-08-26）的参数：
 
 - `_filterGrade=10`
 - `_filterMatchCount=2`
 - `_filterStatTypeList=[10,20,13]`（暴击率 / 眩晕率 / 技能暴击率）
-- 默认串行；可选 `-j 2` 波次并发 `spawn-and-sell`（换装/出售仍串行）
+- 所有 `spawn-and-sell` 请求严格串行，不提供多线程并发入口
+
+`auto` 的 series `Spawn:Item` 任务即使目标仅为 50，也会执行一次完整的
+250 件超级批次；装备票不足 250 时不会发送请求。
 
 炉子维护（查 info / 投 bit / 满了建造 / 建造完成）在 `auto` 里由 `run_item_spawner_care` 自动跑，不进 `zb`。
 设备日志对照见 `iosver/SOP_DEVICE_LOGS.md`。

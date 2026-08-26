@@ -9,6 +9,7 @@ from unittest.mock import patch
 from client.apis import battle as battle_api
 from client import qmd_auto
 from client.series_quest_care import (
+    _run_item_spawn,
     _run_mob_kills,
     load_series_definitions,
     quest_target,
@@ -74,6 +75,51 @@ class FakeBattleSession:
 
 
 class SeriesQuestCareTests(unittest.TestCase):
+    def test_item_spawn_target_50_runs_one_250_super_batch(self) -> None:
+        session = SimpleNamespace()
+        log = lambda _line: None
+        with (
+            patch(
+                "client.series_quest_care.fetch_item_ticket_stock",
+                return_value=({}, 750),
+            ),
+            patch(
+                "client.series_quest_care.run_spawn_batches",
+                return_value={"ok": True, "items_ok": 250, "batches_ok": 1},
+            ) as spawn_mock,
+        ):
+            result = _run_item_spawn(session, remaining=50, log=log)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["requested"], 50)
+        self.assertEqual(result["planned"], 250)
+        self.assertEqual(result["opened"], 250)
+        spawn_mock.assert_called_once_with(
+            session,
+            batches=1,
+            item_ticket_start=750,
+            auto_equip=True,
+            auto_sell=True,
+            log=log,
+        )
+
+    def test_item_spawn_does_not_send_partial_super_batch(self) -> None:
+        session = SimpleNamespace()
+        with (
+            patch(
+                "client.series_quest_care.fetch_item_ticket_stock",
+                return_value=({}, 249),
+            ),
+            patch("client.series_quest_care.run_spawn_batches") as spawn_mock,
+        ):
+            result = _run_item_spawn(session, remaining=50, log=lambda _line: None)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["attempted"])
+        self.assertEqual(result["planned"], 0)
+        self.assertEqual(result["stop_reason"], "item_ticket_exhausted")
+        spawn_mock.assert_not_called()
+
     def test_no_current_series_task_is_a_clean_skip(self) -> None:
         client = FakeClient({"/api/quest/list": [quest_list()]})
         result = run_series_quest_care(
