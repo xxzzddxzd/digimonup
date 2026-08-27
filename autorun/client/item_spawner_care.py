@@ -16,6 +16,7 @@ Runtime info (_itemSpawner):
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -33,6 +34,14 @@ SESSION_KICK = -19006
 GOODS_GOLD = 0  # E_GOODS_TYPE.Gold — 比特 / bit
 GOODS_ITEM_TICKET = 50  # E_GOODS_TYPE.ItemTicket — 装备生成券
 SUPER_SPAWN_COUNT = 250  # 1.3.0 live client super-spawn batch size
+SPAWN_COOLDOWN_CODE = -35012
+# The 1.3.0 client naturally spaces requests with its result animation.  The
+# API does not return a cooldown timestamp. Live verification showed a roughly
+# five-second gate, so start conservatively and learn a longer interval from
+# -35012 when necessary.
+SUPER_SPAWN_INITIAL_INTERVAL_SEC = 5.25
+SUPER_SPAWN_COOLDOWN_RETRY_DELAYS_SEC = (1.0, 2.0, 3.0, 5.0, 8.0)
+SUPER_SPAWN_COOLDOWN_MARGIN_SEC = 0.15
 
 # Live client spawn-and-sell filter (device capture 2026-08-26, game 1.3.0).
 # E_STAT: 10=CriticalRate, 20=StunRate, 13=SkillCriticalRate
@@ -928,6 +937,8 @@ def run_spawn_batches(
         "ok": False,
         "batches_ok": 0,
         "items_ok": 0,
+        "cooldown_retries": 0,
+        "cooldown_wait_sec": 0.0,
         "runs": [],
         "equip_actions": [],
     }
@@ -1038,6 +1049,55 @@ def run_spawn_batches(
     ticket_remaining = item_ticket_start
     stop = False
     batch_no = 0
+    last_success_at: float | None = None
+    learned_interval_sec = SUPER_SPAWN_INITIAL_INTERVAL_SEC
+    result["cooldown_interval_sec"] = learned_interval_sec
+
+    def _sleep_for_cooldown(seconds: float, *, reason: str) -> None:
+        delay = max(0.0, float(seconds))
+        if delay <= 0:
+            return
+        result["cooldown_wait_sec"] = round(
+            float(result.get("cooldown_wait_sec") or 0.0) + delay,
+            3,
+        )
+        log(f"[*] zb super cooldown: wait {delay:.2f}s ({reason})")
+        time.sleep(delay)
+
+    def _do_spawn_with_cooldown_retry() -> dict:
+        """Send one batch, waiting/retrying when the server reports -35012."""
+        nonlocal last_success_at, learned_interval_sec
+
+        previous_success_at = last_success_at
+        if previous_success_at is not None and learned_interval_sec > 0:
+            remaining = learned_interval_sec - (time.monotonic() - previous_success_at)
+            if remaining > 0:
+                _sleep_for_cooldown(remaining, reason="learned interval")
+
+        body = _do_spawn()
+        retry_count = 0
+        for delay in SUPER_SPAWN_COOLDOWN_RETRY_DELAYS_SEC:
+            if _code(body) != SPAWN_COOLDOWN_CODE:
+                break
+            retry_count += 1
+            result["cooldown_retries"] = int(result["cooldown_retries"]) + 1
+            _sleep_for_cooldown(delay, reason=f"server {SPAWN_COOLDOWN_CODE}")
+            body = _do_spawn()
+
+        if _code(body) == 0:
+            now = time.monotonic()
+            if retry_count and previous_success_at is not None:
+                observed = (
+                    now - previous_success_at + SUPER_SPAWN_COOLDOWN_MARGIN_SEC
+                )
+                learned_interval_sec = max(learned_interval_sec, observed)
+                result["cooldown_interval_sec"] = round(learned_interval_sec, 3)
+                log(
+                    f"[*] zb learned super cooldown interval "
+                    f"{learned_interval_sec:.2f}s"
+                )
+            last_success_at = now
+        return body
 
     def _handle_body(batch_no: int, this_count: int, body: Any) -> tuple[dict[str, Any], bool]:
         """Process one spawn response. Returns (run, should_stop)."""
@@ -1088,7 +1148,7 @@ def run_spawn_batches(
                     equipped = load_equipped_by_type(session)
                 except Exception:
                     pass
-            body = _do_spawn()
+            body = _do_spawn_with_cooldown_retry()
             _raise_if_kick(body, "item/spawn-and-sell")
             code = _code(body)
 
@@ -1200,7 +1260,7 @@ def run_spawn_batches(
             break
         batch_no += 1
         try:
-            body = _do_spawn()
+            body = _do_spawn_with_cooldown_retry()
         except SessionKicked:
             raise
         except Exception as exc:

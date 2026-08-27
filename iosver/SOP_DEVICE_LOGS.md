@@ -80,6 +80,7 @@ autorun `zb` 默认已对齐上表，见 `autorun/client/item_spawner_care.py`�
 - `DEFAULT_FILTER_MATCH_COUNT = 2`
 - `DEFAULT_FILTER_STAT_TYPE_LIST = [10, 20, 13]`
 - 固定 `_count=250`、`_isSuper=true`，严格串行
+- 连续批次默认等待 5.25 秒；autorun 遇到 `-35012` 会自动退避并学习更长间隔
 
 覆盖示例：
 

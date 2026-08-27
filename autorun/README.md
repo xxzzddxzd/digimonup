@@ -198,6 +198,7 @@ python3 main.py zb --filter-grade 0 --filter-match 0 --filter-stat ""   # 关闭
 - `_filterMatchCount=2`
 - `_filterStatTypeList=[10,20,13]`（暴击率 / 眩晕率 / 技能暴击率）
 - 所有 `spawn-and-sell` 请求严格串行，不提供多线程并发入口
+- 连续批次默认等待 5.25 秒；若仍返回 `-35012`（生成冷却），会自动退避重试并学习更长间隔
 
 `auto` 的 series `Spawn:Item` 任务即使目标仅为 50，也会执行一次完整的
 250 件超级批次；装备票不足 250 时不会发送请求。
