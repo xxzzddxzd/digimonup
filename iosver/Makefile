@@ -1,5 +1,11 @@
-SDK := $(shell xcrun --sdk iphoneos --show-sdk-path)
-CLANG := $(shell xcrun -f clang++)
+SDK := $(shell xcrun --sdk iphoneos --show-sdk-path 2>/dev/null)
+ifeq ($(SDK),)
+SDK := /var/jb/usr/share/SDKs/iPhoneOS.sdk
+endif
+CLANG := $(shell xcrun -f clang++ 2>/dev/null)
+ifeq ($(CLANG),)
+CLANG := clang++
+endif
 TARGET := arm64-apple-ios15.0
 
 .PHONY: all clean
@@ -12,7 +18,7 @@ PCJBProbe.dylib: PCJBProbe.mm
 		-framework Foundation -framework UIKit -framework CoreGraphics \
 		-Wl,-install_name,/var/jb/usr/lib/TweakInject/PCJBProbe.dylib \
 		-o $@ $<
-	codesign --force --sign - $@
+	(codesign --force --sign - $@ 2>/dev/null) || ldid2 -S $@
 
 clean:
 	rm -f PCJBProbe.dylib

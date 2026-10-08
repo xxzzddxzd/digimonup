@@ -31,7 +31,7 @@ class SequenceClient(FakeClient):
         return self.responses.pop(0)
 
 
-class Version130Tests(unittest.TestCase):
+class Version150Tests(unittest.TestCase):
     def test_stale_account_capture_does_not_downgrade_client_profile(self) -> None:
         config = ClientConfig(load_saved_account=False)
 
@@ -44,7 +44,7 @@ class Version130Tests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(config.version, "1.3.0")
+        self.assertEqual(config.version, "1.5.0")
         self.assertEqual(config.unity_version, "6000.3.11f1")
         self.assertEqual(config.account.device_model, "iPhone15,3")
 

@@ -190,9 +190,9 @@ python3 main.py zb --filter-grade 10 --filter-match 2 --filter-stat 10,20,13
 python3 main.py zb --filter-grade 0 --filter-match 0 --filter-stat ""   # 关闭筛选
 ```
 
-开装备走 `POST /api/item/spawn-and-sell`。1.3.0 请求会显式发送
+开装备走 `POST /api/item/spawn-and-sell`。1.5.0 请求会显式发送
 `_count=250` 和 `_isSuper=true`，保持超级装备生成模式；默认筛选沿用
-实机 1.3.0 客户端（2026-08-26）的参数：
+实机 1.5.0 客户端的参数（与 1.3.0 捕获一致）：
 
 - `_filterGrade=10`
 - `_filterMatchCount=2`

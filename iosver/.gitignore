@@ -1,3 +1,6 @@
 PCJBProbe.dylib
+PCJBDump.dylib
+il2cpp-*.dump
+il2cpp-*.status
 logs/
 .DS_Store

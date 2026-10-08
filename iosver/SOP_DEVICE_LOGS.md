@@ -55,7 +55,7 @@ cd iosver
 rg -n 'isSuper|_count|filterGrade|filterStatTypeList|filterMatchCount' iosver/logs/zb-check/PCJBProbe-current.log | tail
 ```
 
-实机 1.3.0 捕获（2026-08-26）：
+实机 1.5.0 请求体仍与 1.3.0 捕获（2026-08-26）一致：
 
 ```json
 {

@@ -1,4 +1,4 @@
-"""DIGIMON UP 1.3.0 client-profile defaults and account identity settings."""
+"""DIGIMON UP 1.5.0 client-profile defaults and account identity settings."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -18,7 +18,7 @@ class AccountConfig:
     store_region_code: int = 250
     region_type: int = 1
     # Content-data hash used as _dataNo after game data is ready.
-    data_no: str = "ded91528d845767b07f5a6ce30f85e6bddc314e65dce0f91d8627d9aa9f83e08"
+    data_no: str = "aed1c8c352cb3c15069e64790695f2c592137f7a6321fe2896b0bbb313b423d7"
     # Preferred server after auth (capture used 14).
     preferred_server_num: int = 14
     # Capture-time main-story progress (best estimate).
@@ -30,7 +30,7 @@ class AccountConfig:
 @dataclass
 class ClientConfig:
     base_url: str = "https://dm-content.dgup.channel.or.jp"
-    version: str = "1.3.0"
+    version: str = "1.5.0"
     unity_version: str = "6000.3.11f1"
     accept_language: str = "zh-CN,zh-Hans;q=0.9"
     timeout: float = 30.0
