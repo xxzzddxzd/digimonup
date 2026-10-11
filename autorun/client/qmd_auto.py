@@ -369,6 +369,7 @@ def run_auto_once(
                             f"ok={dad.get('ok')} "
                             f"ad_ok={ad.get('total_ok')} ad_fail={ad.get('total_fail')} "
                             f"clears={dad.get('total_clears')} "
+                            f"sweeps={dad.get('total_sweeps')} "
                             f"advances={dad.get('total_advances')} "
                             f"clear_fail={dad.get('total_clear_fail')} "
                             f"skip_battle={len(dad.get('skipped_battle') or [])} "

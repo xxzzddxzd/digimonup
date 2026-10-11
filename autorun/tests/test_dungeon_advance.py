@@ -18,11 +18,13 @@ install_stubs()
 import main as app  # noqa: E402
 from client.dungeon_care import (  # noqa: E402
     ADVANCING_DUNGEON_CONFIG,
+    SAFETY_MAX_CLEARS_PER_KEY,
     advancing_dungeon_progress,
     resolve_tower_dungeon_key,
     rotating_trial_progress,
     run_advancing_dungeon_clear,
     run_advancing_dungeon_sweep,
+    run_dungeon_auto_care,
 )
 
 
@@ -495,6 +497,113 @@ class DungeonAdvanceTests(unittest.TestCase):
         self.assertEqual(ADVANCING_DUNGEON_CONFIG[9]["region"], 100000)
         self.assertEqual(ADVANCING_DUNGEON_CONFIG[11]["stage"], 9)
         self.assertEqual(ADVANCING_DUNGEON_CONFIG[12]["stage"], 10)
+
+
+DUNGEON_META = {
+    1: {"name": "GT_Dungeon_Lamp", "costType": "DungeonTicket_Lamp", "cost": 1, "stageKey": 10000},
+    2: {"name": "GT_Dungeon_Lava", "costType": "DungeonTicket_Lava", "cost": 1, "stageKey": 10020},
+    3: {"name": "GT_Dungeon_Flame", "costType": "DungeonTicket_Flame", "cost": 1, "stageKey": 10010},
+}
+DUNGEON_STAGES = {1: 10000, 2: 10020, 3: 10010}
+DUNGEON_ROWS = [
+    {"_key": 1, "_level": 429, "_challengeLevel": 0, "_isGetReward": True, "_adCount": 0},
+    {"_key": 2, "_level": 428, "_challengeLevel": 0, "_isGetReward": True, "_adCount": 0},
+    {"_key": 3, "_level": 366, "_challengeLevel": 0, "_isGetReward": True, "_adCount": 0},
+]
+
+
+def ad_care_result() -> dict:
+    return {"ok": True, "total_ok": 0, "total_fail": 0, "skipped": [], "claimed": []}
+
+
+class DungeonAutoBurnTests(unittest.TestCase):
+    """`auto` burns ordinary dungeon tickets by sweeping, never by battle.
+
+    The battle wire answers _code 0 for these dungeons in 1.5.0 but spends
+    nothing, which used to fill the loop up to SAFETY_MAX_CLEARS_PER_KEY while
+    every ticket stayed put.
+    """
+
+    def _run(self, *, stock: dict[str, int], sweep_side_effect):
+        session = FakeSession()
+        with (
+            patch("client.dungeon_care.run_dungeon_ad_care", return_value=ad_care_result()),
+            patch("client.dungeon_care.fetch_dungeon_rows", return_value=(DUNGEON_ROWS, {})),
+            patch("client.dungeon_care.load_key_meta", return_value=DUNGEON_META),
+            patch("client.dungeon_care.load_key_stage_map", return_value=DUNGEON_STAGES),
+            patch("client.dungeon_care.fetch_goods_map", return_value={}),
+            patch(
+                "client.dungeon_care.ticket_stock_for_key",
+                side_effect=lambda key, _goods=None, _meta=None: stock[str(key)],
+            ),
+            patch("client.dungeon_care.run_dungeon_sweep", side_effect=sweep_side_effect) as sweep_mock,
+            patch("client.dungeon_care.run_dungeon_clear") as battle_mock,
+        ):
+            result = run_dungeon_auto_care(session, log=lambda _line: None)
+        return result, sweep_mock, battle_mock
+
+    def test_sweeps_ordinary_keys_until_stock_runs_out(self) -> None:
+        stock = {"1": 17, "2": 17, "3": 2}
+
+        def sweep(_session, *, key, log):
+            stock[str(key)] -= 1
+            return {"ok": True, "code": 0, "level": 366, "rewards": [1, 2, 3]}
+
+        result, sweep_mock, battle_mock = self._run(stock=stock, sweep_side_effect=sweep)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([call.kwargs["key"] for call in sweep_mock.call_args_list], [3, 3])
+        battle_mock.assert_not_called()
+        self.assertEqual(result["total_sweeps"], 2)
+        self.assertEqual(result["total_clears"], 2)
+        # Tickets actually leave the account, so the loop ends on stock, not the cap.
+        self.assertLess(result["total_sweeps"], SAFETY_MAX_CLEARS_PER_KEY)
+        self.assertEqual(stock["3"], 0)
+
+    def test_lamp_and_lava_tickets_are_reserved_for_the_series_quest(self) -> None:
+        stock = {"1": 17, "2": 17, "3": 0}
+
+        def sweep(_session, *, key, log):  # pragma: no cover - must not run
+            raise AssertionError(f"key {key} must not be swept by auto")
+
+        result, sweep_mock, _battle = self._run(stock=stock, sweep_side_effect=sweep)
+
+        self.assertTrue(result["ok"])
+        sweep_mock.assert_not_called()
+        reserved = {
+            entry["key"]: entry["reason"]
+            for entry in result["skipped_battle"]
+            if entry["reason"] == "reserved_for_series_quest"
+        }
+        self.assertEqual(reserved, {1: "reserved_for_series_quest", 2: "reserved_for_series_quest"})
+        # Their stock is untouched for run_series_quest_care to spend.
+        self.assertEqual((stock["1"], stock["2"]), (17, 17))
+
+    def test_key_with_nothing_cleared_is_skipped_cleanly(self) -> None:
+        stock = {"1": 0, "2": 0, "3": 5}
+
+        def sweep(_session, *, key, log):
+            return {"ok": False, "error": "no_cleared_level"}
+
+        result, sweep_mock, _battle = self._run(stock=stock, sweep_side_effect=sweep)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(sweep_mock.call_count, 1)
+        self.assertEqual(result["total_clear_fail"], 0)
+        reasons = [entry["reason"] for entry in result["skipped_battle"]]
+        self.assertIn("no_cleared_level", reasons)
+
+    def test_rejected_sweep_stops_that_key_and_marks_failure(self) -> None:
+        stock = {"1": 0, "2": 0, "3": 5}
+
+        def sweep(_session, *, key, log):
+            return {"ok": False, "code": -29004, "error": None}
+
+        result, sweep_mock, _battle = self._run(stock=stock, sweep_side_effect=sweep)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(sweep_mock.call_count, 1)
+        self.assertEqual(result["total_clear_fail"], 1)
 
 
 if __name__ == "__main__":
