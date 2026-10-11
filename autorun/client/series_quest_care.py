@@ -16,6 +16,7 @@ from .dungeon_care import (
     SessionKicked as DungeonSessionKicked,
     fetch_goods_map,
     run_dungeon_clear,
+    run_dungeon_sweep,
     ticket_stock_for_key,
 )
 from .farm import _extract_spawn_waves
@@ -439,6 +440,19 @@ def _run_mob_kills(
 def _run_dungeon(
     session: GameSession, *, subtype: str, remaining: int, log: LogFn
 ) -> dict[str, Any]:
+    """Advance a `DungeonClear` Guide task.
+
+    Live 1.5.0 (2026-10-11): a Guide `DungeonClear` step is satisfied by
+    ``/api/dungeon/sweep`` on an already-cleared floor.  The sweep consumes one
+    ticket, pays rewards, and its response already carries the incremented quest
+    row (key=2 Lava: goods 102 17->16, quest 9007 value 1->2).
+
+    The battle wire (`run_dungeon_clear`) is deliberately not the default: the
+    server answers `_code: 0` for it but consumes nothing, pays no reward and
+    leaves the quest value untouched, which left this phase spinning forever.
+    It is kept as a fallback for a dungeon that has never been cleared, where
+    there is no floor to sweep yet.
+    """
     key = DUNGEON_BY_SUBTYPE[subtype]
     action: dict[str, Any] = {
         "ok": True,
@@ -456,14 +470,27 @@ def _run_dungeon(
             action["stop_reason"] = "dungeon_no_attempts"
             action["dungeon_no_attempts"] = True
             return action
-        one = run_dungeon_clear(session, key=key, log=log)
+
+        one = run_dungeon_sweep(session, key=key, log=log)
         action["attempted"] = True
+        action["mode"] = "sweep"
         if not one.get("ok"):
-            action["ok"] = False
-            action["code"] = one.get("start_code", one.get("end_code"))
-            action["message"] = one.get("error") or one.get("end_message")
-            action["stop_reason"] = "dungeon_clear_failed"
-            return action
+            if one.get("error") == "no_cleared_level":
+                # Never cleared: no floor to sweep, so take the first clear by battle.
+                log(
+                    f"[*] series quest {subtype}: no cleared floor to sweep, "
+                    "falling back to one battle"
+                )
+                one = run_dungeon_clear(session, key=key, log=log)
+                action["mode"] = "battle"
+            if not one.get("ok"):
+                action["ok"] = False
+                action["code"] = one.get("code", one.get("end_code"))
+                action["message"] = (
+                    one.get("message") or one.get("error") or one.get("end_message")
+                )
+                action["stop_reason"] = "dungeon_clear_failed"
+                return action
         action["cleared"] += 1
     return action
 

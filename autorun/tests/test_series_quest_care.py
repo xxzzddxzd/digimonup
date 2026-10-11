@@ -163,6 +163,105 @@ class SeriesQuestCareTests(unittest.TestCase):
         self.assertNotIn("/api/dungeon/start", [path for path, _ in client.calls])
         self.assertIn(("/api/quest/complete", {"_keys": [9006]}), client.calls)
 
+    def test_dungeon_task_sweeps_and_advances_instead_of_battling(self) -> None:
+        # Live 1.5.0 (2026-10-11): /api/dungeon/sweep on the cleared floor
+        # consumes the ticket, pays rewards and returns quest 9007 already
+        # incremented.  The battle wire answers _code 0 but changes nothing, so
+        # it must not be what this phase relies on.
+        client = FakeClient(
+            {
+                "/api/quest/list": [
+                    quest_list(quest_row(9007, 1)),  # before
+                    quest_list(quest_row(9007, 2)),  # after sweep
+                    quest_list(quest_row(9007, 2)),  # complete -> claim
+                    quest_list(),                    # nothing left -> stop
+                ],
+                "/api/goods/list": [
+                    {"_code": 0, "_goodsList": {"_list": [{"_type": 102, "_value": 5}]}}
+                ],
+                "/api/quest/complete": [{"_code": 0}],
+            }
+        )
+        session = SimpleNamespace(client=client, init_data={})
+
+        with (
+            patch(
+                "client.series_quest_care.run_dungeon_sweep",
+                return_value={"ok": True, "code": 0, "level": 428},
+            ) as sweep_mock,
+            patch("client.series_quest_care.run_dungeon_clear") as battle_mock,
+        ):
+            result = run_series_quest_care(session, log=lambda _line: None)
+
+        self.assertTrue(result["ok"])
+        sweep_mock.assert_called_once()
+        battle_mock.assert_not_called()
+        self.assertEqual(result["claimed"], [9007])
+        self.assertEqual(result["actions"][0]["mode"], "sweep")
+        self.assertEqual(result["actions"][0]["before"], 1)
+        self.assertEqual(result["actions"][0]["after"], 2)
+
+    def test_dungeon_task_falls_back_to_battle_without_a_cleared_floor(self) -> None:
+        client = FakeClient(
+            {
+                "/api/quest/list": [
+                    quest_list(quest_row(9007, 1)),
+                    quest_list(quest_row(9007, 2)),
+                    quest_list(quest_row(9007, 2)),
+                    quest_list(),
+                ],
+                "/api/goods/list": [
+                    {"_code": 0, "_goodsList": {"_list": [{"_type": 102, "_value": 5}]}}
+                ],
+                "/api/quest/complete": [{"_code": 0}],
+            }
+        )
+        session = SimpleNamespace(client=client, init_data={})
+
+        with (
+            patch(
+                "client.series_quest_care.run_dungeon_sweep",
+                return_value={"ok": False, "error": "no_cleared_level"},
+            ) as sweep_mock,
+            patch(
+                "client.series_quest_care.run_dungeon_clear",
+                return_value={"ok": True, "end_code": 0},
+            ) as battle_mock,
+        ):
+            result = run_series_quest_care(session, log=lambda _line: None)
+
+        self.assertTrue(result["ok"])
+        sweep_mock.assert_called_once()
+        battle_mock.assert_called_once()
+        self.assertEqual(result["actions"][0]["mode"], "battle")
+        self.assertEqual(result["claimed"], [9007])
+
+    def test_dungeon_sweep_failure_stops_the_phase_with_the_code(self) -> None:
+        client = FakeClient(
+            {
+                # run_series_quest_care re-reads the task after the action, even
+                # when the action reports a stop reason.
+                "/api/quest/list": [
+                    quest_list(quest_row(9007, 1)),
+                    quest_list(quest_row(9007, 1)),
+                ],
+                "/api/goods/list": [
+                    {"_code": 0, "_goodsList": {"_list": [{"_type": 102, "_value": 5}]}}
+                ],
+            }
+        )
+        session = SimpleNamespace(client=client, init_data={})
+
+        with patch(
+            "client.series_quest_care.run_dungeon_sweep",
+            return_value={"ok": False, "code": -29004, "message": "not sweepable"},
+        ):
+            result = run_series_quest_care(session, log=lambda _line: None)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stopped_reason"], "dungeon_clear_failed")
+        self.assertEqual(result["actions"][0]["code"], -29004)
+
     def test_skill_spawn_uses_ticket_shop_and_claims(self) -> None:
         client = FakeClient(
             {
