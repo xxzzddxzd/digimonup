@@ -29,6 +29,7 @@ typedef size_t (*il2cpp_field_get_offset_t)(void *field);
 typedef void *(*il2cpp_thread_attach_t)(void *domain);
 typedef void (*il2cpp_thread_detach_t)(void *thread);
 typedef void *(*il2cpp_class_get_parent_t)(void *klass);
+typedef void (*il2cpp_field_static_get_value_t)(void *field, void *value);
 
 static il2cpp_domain_get_t p_domain_get;
 static il2cpp_domain_get_assemblies_t p_domain_get_assemblies;
@@ -47,6 +48,7 @@ static il2cpp_field_get_offset_t p_field_get_offset;
 static il2cpp_thread_attach_t p_thread_attach;
 static il2cpp_thread_detach_t p_thread_detach;
 static il2cpp_class_get_parent_t p_class_get_parent;
+static il2cpp_field_static_get_value_t p_field_static_get_value;
 
 static uintptr_t gUFBase;
 static uintptr_t gUFEnd;
@@ -75,6 +77,7 @@ static const char *kKeywords[] = {
     "CodeStage", "AntiCheat", "Caching",
     "DataInfo", "StageData", "RegionData",
     "C_Result", "wRequest", "wResponse",
+    "E_GOODS_TYPE", "GOODS_TYPE", "E_STAT", "E_ITEM",
     NULL
 };
 
@@ -183,7 +186,14 @@ static void DumpClass(void *klass, const char *imageName) {
         while ((field = p_class_get_fields(klass, &iter))) {
             const char *fname = p_field_get_name(field) ?: "";
             size_t off = p_field_get_offset(field);
-            fprintf(gOut, "  FIELD offset=0x%lx name=%s\n", (unsigned long)off, fname);
+            // Enum literals carry their constant in metadata; read it so the
+            // dump gives authoritative name -> value pairs.
+            int32_t literal = 0;
+            if (p_field_static_get_value && off == 0) {
+                p_field_static_get_value(field, &literal);
+            }
+            fprintf(gOut, "  FIELD offset=0x%lx value=%d name=%s\n",
+                    (unsigned long)off, literal, fname);
         }
     }
 
@@ -230,6 +240,7 @@ static bool ResolveFromDefault(void) {
     SYM("il2cpp_thread_attach", p_thread_attach);
     SYM("il2cpp_thread_detach", p_thread_detach);
     SYM("il2cpp_class_get_parent", p_class_get_parent);
+    SYM("il2cpp_field_static_get_value", p_field_static_get_value);
 #undef SYM
     return p_domain_get != NULL;
 }
