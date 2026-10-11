@@ -3,7 +3,14 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from client.guild_care import run_guild_auto_care
+try:  # `python3 -m unittest tests.test_guild_care`
+    from ._stubs import install_stubs
+except ImportError:  # `python3 tests/test_guild_care.py`
+    from _stubs import install_stubs
+
+install_stubs()
+
+from client.guild_care import run_guild_auto_care  # noqa: E402
 
 
 class FakeClient:
@@ -109,6 +116,22 @@ class GuildCareTests(unittest.TestCase):
         self.assertNotIn("/api/boss-damage/reward-list", called_paths)
         self.assertNotIn("/api/boss-damage/reward", called_paths)
         self.assertNotIn("/api/dungeon/camp-sweep", called_paths)
+
+    def test_not_in_camp_is_a_clean_skip_without_further_calls(self) -> None:
+        # Live 1.5.0: character "axb" has _campUID "" so camp/info answers
+        # -58002 and boss-damage answers -58024.  That must not look like a
+        # guild failure on every single auto run.
+        client = FakeClient(
+            {"/api/camp/info": [{"_code": -58002, "_message": "캠프 멤버 정보가 없습니다."}]}
+        )
+        session = SimpleNamespace(client=client)
+
+        result = run_guild_auto_care(session, log=lambda _line: None)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skipped_reason"], "not_in_camp")
+        self.assertEqual([path for path, _b in client.calls], ["/api/camp/info"])
+        self.assertEqual(result["total_failed"], 0)
 
 
 if __name__ == "__main__":

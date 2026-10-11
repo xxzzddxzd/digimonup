@@ -8,8 +8,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import main as app
-from client.dungeon_care import (
+try:  # `python3 -m unittest tests.test_dungeon_advance`
+    from ._stubs import install_stubs
+except ImportError:  # `python3 tests/test_dungeon_advance.py`
+    from _stubs import install_stubs
+
+install_stubs()
+
+import main as app  # noqa: E402
+from client.dungeon_care import (  # noqa: E402
     ADVANCING_DUNGEON_CONFIG,
     advancing_dungeon_progress,
     resolve_tower_dungeon_key,

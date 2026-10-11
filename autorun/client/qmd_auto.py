@@ -1,4 +1,4 @@
-"""One-shot maintenance: farm + guild + dungeon/series + lab/mine/dbox + pvp/qmd/afk.
+"""One-shot maintenance: farm + shop/gasha + guild + dungeon/series + lab/mine/dbox + pvp/qmd/afk.
 
 Scheduling is external (crontab hourly). No intimacy-cooldown sleep loop.
 No heartbeat. Session kick (-19006): wait then re-auth and finish once.
@@ -37,6 +37,8 @@ from .dungeon_care import run_dungeon_auto_care
 from .dungeon_care import SessionKicked as DungeonSessionKicked
 from .shop_care import run_shop_daily_buy
 from .shop_care import SessionKicked as ShopSessionKicked
+from .gasha_care import run_gasha_daily
+from .gasha_care import SessionKicked as GashaSessionKicked
 from .guild_care import run_guild_auto_care
 from .guild_care import SessionKicked as GuildSessionKicked
 from .series_quest_care import run_series_quest_care
@@ -245,8 +247,9 @@ def run_auto_once(
 ) -> int:
     """Single run (crontab-friendly):
 
-    login -> farm -> shop -> guild -> dungeon -> series quest -> lab -> mine -> dbox ->
-    furnace -> pvp -> qmd(if ready, else skip) -> afk -> exit
+    login -> farm -> shop -> gasha(daily 3000-Crystal 10-pull) -> guild ->
+    dungeon -> series quest -> lab -> mine -> dbox -> furnace -> pvp ->
+    qmd(if ready, else skip) -> afk -> exit
 
     No long sleep on intimacy cooldown. On -19006: wait 600s, re-login, finish once.
     """
@@ -307,6 +310,28 @@ def run_auto_once(
                     )
                 except ShopSessionKicked as sk:
                     raise SessionKicked(sk.where, body=sk.body) from sk
+
+                # gasha: every banner that still has its daily 3000-Crystal
+                # 10-pull left, discovered dynamically from /api/gasha/list.
+                # A banner that fails is logged and skipped, never a reason to
+                # abort the rest of the run.
+                try:
+                    gasha = run_gasha_daily(session, log=log)
+                    _append_result_log(
+                        result_path,
+                        result="gasha",
+                        detail=(
+                            f"ok={gasha.get('ok')} "
+                            f"targets={gasha.get('targets')} "
+                            f"pulled={[x.get('key') for x in (gasha.get('pulled') or [])]} "
+                            f"failed={[x.get('key') for x in (gasha.get('failed') or [])]} "
+                            f"rewards={gasha.get('reward_total')} "
+                            f"skip={gasha.get('skipped_reason')}"
+                        ),
+                        log=log,
+                    )
+                except GashaSessionKicked as gk:
+                    raise SessionKicked(gk.where, body=gk.body) from gk
 
                 # guild: attendance + training/dojo rewards + all live attempts
                 try:

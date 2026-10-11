@@ -6,9 +6,16 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from client.apis import battle as battle_api
-from client import qmd_auto
-from client.series_quest_care import (
+try:  # `python3 -m unittest tests.test_series_quest_care`
+    from ._stubs import install_stubs
+except ImportError:  # `python3 tests/test_series_quest_care.py`
+    from _stubs import install_stubs
+
+install_stubs()
+
+from client.apis import battle as battle_api  # noqa: E402
+from client import qmd_auto  # noqa: E402
+from client.series_quest_care import (  # noqa: E402
     _run_item_spawn,
     _run_mob_kills,
     load_series_definitions,
@@ -238,6 +245,7 @@ class SeriesQuestCareTests(unittest.TestCase):
             patch.object(qmd_auto, "_login", return_value=1.0),
             patch.object(qmd_auto, "run_farm_maintain", return_value={"ok": True}),
             patch.object(qmd_auto, "run_shop_daily_buy", return_value={"ok": True}),
+            patch.object(qmd_auto, "run_gasha_daily", return_value={"ok": True}),
             patch.object(qmd_auto, "run_guild_auto_care", return_value={"ok": True}),
             patch.object(
                 qmd_auto,
@@ -276,6 +284,7 @@ class SeriesQuestCareTests(unittest.TestCase):
         series_mock.assert_called_once_with(session, log=unittest.mock.ANY)
         lab_mock.assert_called_once()
         self.assertIn("result=series", written)
+        self.assertIn("result=gasha", written)
         self.assertIn("stop=dungeon_no_attempts", written)
         self.assertIn("result=done", written)
 

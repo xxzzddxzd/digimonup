@@ -22,6 +22,19 @@ LogFn = Callable[[str], None]
 
 SESSION_KICK = -19006
 
+# The character is not in a camp (guild).  Everything guild-related reports one
+# of these instead of a real failure, so `auto` treats it as a clean skip:
+#   -58002 캠프 멤버 정보가 없습니다.   (camp/info, camp/member-list, camp/help-list)
+#   -58024 캠프 멤버만 참여가능합니다. (boss-damage/*)
+NOT_IN_CAMP_CODES = frozenset({-58002, -58024})
+
+
+def _not_in_camp(code: Any) -> bool:
+    try:
+        return int(code) in NOT_IN_CAMP_CODES
+    except (TypeError, ValueError):
+        return False
+
 GUILD_DUNGEONS: tuple[dict[str, Any], ...] = (
     {
         "name": "training",
@@ -306,6 +319,20 @@ def run_guild_auto_care(
 
     attendance = _claim_attendance(session, log=log)
     result["attendance"] = attendance
+
+    # No camp membership: every remaining guild call would fail with -58024, so
+    # report the real reason once and leave the rest of `auto` alone.
+    if _not_in_camp(attendance.get("info_code")):
+        result["ok"] = True
+        result["skipped_reason"] = "not_in_camp"
+        result["total_remaining"] = 0
+        log(
+            "[*] guild skip: character is not in a camp "
+            f"(camp/info code={attendance.get('info_code')}); "
+            "join a guild in game to re-enable attendance/training/dojo"
+        )
+        return result
+
     if not attendance.get("ok"):
         result["ok"] = False
 

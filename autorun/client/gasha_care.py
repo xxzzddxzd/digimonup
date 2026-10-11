@@ -9,6 +9,16 @@ from .session import GameSession
 
 LogFn = Callable[[str], None]
 
+SESSION_KICK = -19006
+
+
+class SessionKicked(RuntimeError):
+    def __init__(self, where: str, *, body: Any = None):
+        super().__init__(f"session kick -19006 at {where}")
+        self.where = where
+        self.body = body
+
+
 GASHA_ALIASES = {
     "ga1": gasha_api.GASHA_PARTNER,  # partner / supporter
     "ga2": gasha_api.GASHA_SP,       # sp / holy weapon
@@ -18,6 +28,12 @@ GASHA_LABELS = {
     gasha_api.GASHA_PARTNER: "partner(supporter)",
     gasha_api.GASHA_SP: "sp(holy-weapon)",
 }
+
+# GameData.Gasha: every daily banner is DailyCount=10 pulls billed in Crystal at
+# DailyCurrencyCost=300 each, i.e. one 10-pull costs 3000 Crystal.  The live
+# client sends exactly `_count: 10` with `_isDaily: true` (device capture
+# 2026-10-11, game 1.5.0), so the same request is replayed here.
+GASHA_DAILY_COUNT = 10
 
 
 def _code(body: Any) -> Optional[int]:
@@ -30,6 +46,11 @@ def _code(body: Any) -> Optional[int]:
         return int(c)
     except Exception:
         return None
+
+
+def _raise_if_kick(body: Any, where: str) -> None:
+    if _code(body) == SESSION_KICK:
+        raise SessionKicked(where, body=body)
 
 
 def _bool(v: Any) -> Optional[bool]:
@@ -201,4 +222,112 @@ def run_gasha(
         log(f"[+] gasha ok key={key} rewards={len(result['rewards'])} after={result.get('after')}")
     else:
         log(f"[-] gasha failed code={code} message={result.get('message')}")
+    return result
+
+
+def daily_gasha_keys(payload: Any) -> list[dict[str, Any]]:
+    """Banners whose daily (Crystal-priced) attempt is still available.
+
+    Selection is dynamic: whatever `/api/gasha/list` reports with
+    `_isDailyCanGet` is a target, so newly added or rotating banners need no
+    code change.  The flag flips to false in the spawn response, which is what
+    keeps a run idempotent within the same day.
+    """
+    out: list[dict[str, Any]] = []
+    for item in _gasha_list(payload):
+        summary = summarize_gasha_item(item)
+        if summary.get("isDailyCanGet") is not True:
+            continue
+        key = summary.get("key")
+        if key is None:
+            continue
+        try:
+            summary["key"] = int(key)
+        except (TypeError, ValueError):
+            continue
+        out.append(summary)
+    return out
+
+
+def run_gasha_daily(
+    session: GameSession,
+    *,
+    count: int = GASHA_DAILY_COUNT,
+    log: LogFn = print,
+) -> dict[str, Any]:
+    """Pull every banner that still has its daily 3000-Crystal 10-pull left.
+
+    Best-effort: an individual banner that fails (short on Crystal, banner
+    rotated away mid-run, ...) is recorded and skipped instead of aborting the
+    batch, so the rest of `auto` keeps running.
+    """
+    result: dict[str, Any] = {
+        "ok": False,
+        "count": int(count),
+        "targets": [],
+        "pulled": [],
+        "failed": [],
+        "reward_total": 0,
+    }
+
+    infos = gasha_api.gasha_infos(session.client)
+    _raise_if_kick(infos, "gasha/list")
+    result["infos_code"] = _code(infos)
+    result["infos"] = [summarize_gasha_item(x) for x in _gasha_list(infos)]
+
+    targets = daily_gasha_keys(infos)
+    result["targets"] = [t["key"] for t in targets]
+    log(
+        f"[*] gasha daily targets={result['targets']} "
+        f"banners={len(result['infos'])} count={result['count']}"
+    )
+    if not targets:
+        result["ok"] = True
+        result["skipped_reason"] = "no_daily_available"
+        log("[*] gasha daily skip: no banner reports _isDailyCanGet")
+        return result
+
+    for target in targets:
+        key = int(target["key"])
+        label = GASHA_LABELS.get(key, str(key))
+        try:
+            body = gasha_api.gasha_spawn(
+                session.client,
+                key=key,
+                count=int(count),
+                is_daily=True,
+            )
+        except SessionKicked:
+            raise
+        except Exception as exc:
+            result["failed"].append({"key": key, "label": label, "error": str(exc)})
+            log(f"[!] gasha daily key={key} ({label}) request error: {exc}")
+            continue
+
+        _raise_if_kick(body, f"gasha/spawn key={key}")
+        code = _code(body)
+        rewards = summarize_rewards(body if isinstance(body, dict) else {})
+        after = body.get("_gasha") if isinstance(body, dict) else None
+        entry: dict[str, Any] = {
+            "key": key,
+            "label": label,
+            "code": code,
+            "message": body.get("_message") if isinstance(body, dict) else None,
+            "rewards": len(rewards),
+            "after": summarize_gasha_item(after) if isinstance(after, dict) else None,
+        }
+        if code == 0:
+            result["pulled"].append(entry)
+            result["reward_total"] += len(rewards)
+            log(f"[+] gasha daily ok key={key} ({label}) rewards={len(rewards)}")
+        else:
+            result["failed"].append(entry)
+            log(
+                f"[-] gasha daily failed key={key} ({label}) "
+                f"code={code} message={entry.get('message')}"
+            )
+
+    result["ok"] = not result["failed"]
+    result["ok_count"] = len(result["pulled"])
+    result["fail_count"] = len(result["failed"])
     return result

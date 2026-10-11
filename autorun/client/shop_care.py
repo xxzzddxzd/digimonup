@@ -17,6 +17,19 @@ LogFn = Callable[[str], None]
 
 SESSION_KICK_CODE = -19006
 
+# Server says the target is listed but cannot be bought right now: key 202213
+# still reports `_buyCount: 1` in /api/shop/list while /api/shop/buy answers
+# -32012 판매 중인 상품이 아닙니다.  That is a delisted/rotated item, not a
+# broken run, so it is reported as a skip instead of a failure.
+NOT_PURCHASABLE_CODES = frozenset({-32012})
+
+
+def _not_purchasable(code: Any) -> bool:
+    try:
+        return int(code) in NOT_PURCHASABLE_CODES
+    except (TypeError, ValueError):
+        return False
+
 
 class SessionKicked(RuntimeError):
     def __init__(self, where: str, *, body: Any = None):
@@ -198,6 +211,13 @@ def run_shop_daily_buy(
             log(
                 f"[+] shop buy ok key={key} count={count} "
                 f"afterBuyCount={entry.get('after_buyCount')}"
+            )
+        elif _not_purchasable(code):
+            entry["reason"] = "not_purchasable"
+            result["skipped"].append(entry)
+            log(
+                f"[*] shop buy skip key={key} count={count} "
+                f"code={code} msg={entry.get('message')} (delisted)"
             )
         else:
             result["failed"].append(entry)

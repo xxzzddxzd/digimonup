@@ -4,10 +4,17 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from client import item_spawner_care
-from client.account_store import apply_account_to_config
-from client.apis.item_spawner import item_spawn_and_sell
-from client.config import ClientConfig
+try:  # `python3 -m unittest tests.test_version_150`
+    from ._stubs import install_stubs
+except ImportError:  # `python3 tests/test_version_150.py`
+    from _stubs import install_stubs
+
+install_stubs()
+
+from client import item_spawner_care  # noqa: E402
+from client.account_store import apply_account_to_config  # noqa: E402
+from client.apis.item_spawner import item_spawn_and_sell  # noqa: E402
+from client.config import ClientConfig  # noqa: E402
 
 
 class FakeClient:

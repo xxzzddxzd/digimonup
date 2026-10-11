@@ -3,7 +3,14 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from client.partner_care import ensure_active_lowest_level_partner
+try:  # `python3 -m unittest tests.test_partner_care`
+    from ._stubs import install_stubs
+except ImportError:  # `python3 tests/test_partner_care.py`
+    from _stubs import install_stubs
+
+install_stubs()
+
+from client.partner_care import ensure_active_lowest_level_partner  # noqa: E402
 
 
 class FakeClient:
