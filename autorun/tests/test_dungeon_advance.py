@@ -24,6 +24,7 @@ from client.dungeon_care import (  # noqa: E402
     rotating_trial_progress,
     run_advancing_dungeon_clear,
     run_advancing_dungeon_sweep,
+    run_daily_trial_sweep,
     run_dungeon_auto_care,
 )
 
@@ -528,6 +529,10 @@ class DungeonAutoBurnTests(unittest.TestCase):
         session = FakeSession()
         with (
             patch("client.dungeon_care.run_dungeon_ad_care", return_value=ad_care_result()),
+            patch(
+                "client.dungeon_care.run_daily_trial_sweep",
+                return_value={"ok": True, "key": 7, "rewards": 0, "attempted": True},
+            ),
             patch("client.dungeon_care.fetch_dungeon_rows", return_value=(DUNGEON_ROWS, {})),
             patch("client.dungeon_care.load_key_meta", return_value=DUNGEON_META),
             patch("client.dungeon_care.load_key_stage_map", return_value=DUNGEON_STAGES),
@@ -604,6 +609,138 @@ class DungeonAutoBurnTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(sweep_mock.call_count, 1)
         self.assertEqual(result["total_clear_fail"], 1)
+
+    def test_auto_care_surfaces_the_daily_trial_result(self) -> None:
+        stock = {"1": 0, "2": 0, "3": 0}
+        session = FakeSession()
+
+        with (
+            patch("client.dungeon_care.run_dungeon_ad_care", return_value=ad_care_result()),
+            patch(
+                "client.dungeon_care.run_daily_trial_sweep",
+                return_value={
+                    "ok": True,
+                    "key": 7,
+                    "level": 100,
+                    "attempted": True,
+                    "rewards": 200,
+                    "code": 0,
+                    "skipped_reason": None,
+                },
+            ),
+            patch("client.dungeon_care.fetch_dungeon_rows", return_value=(DUNGEON_ROWS, {})),
+            patch("client.dungeon_care.load_key_meta", return_value=DUNGEON_META),
+            patch("client.dungeon_care.load_key_stage_map", return_value=DUNGEON_STAGES),
+            patch("client.dungeon_care.fetch_goods_map", return_value={}),
+            patch(
+                "client.dungeon_care.ticket_stock_for_key",
+                side_effect=lambda key, _goods=None, _meta=None: stock[str(key)],
+            ),
+        ):
+            result = run_dungeon_auto_care(session, log=lambda _line: None)
+
+        self.assertEqual(result["trial"]["key"], 7)
+        self.assertEqual(result["trial"]["rewards"], 200)
+        self.assertTrue(result["trial"]["attempted"])
+
+
+def trial_progress(*, key: int = 7, cleared: int = 100, max_level: int | None = 100,
+                   play_list: list[int] | None = None) -> dict:
+    return {
+        "key": key,
+        "progress_key": key,
+        "cleared_level": cleared,
+        "challenge_level": 0,
+        "next_level": cleared,
+        "max_level": max_level,
+        "at_max_level": max_level is not None and cleared >= max_level,
+        "progress": {"_key": key, "_level": cleared, "_challengeLevel": 0},
+        "play_list": play_list if play_list is not None else [key],
+    }
+
+
+class DailyTrialSweepTests(unittest.TestCase):
+    """The free once-a-day sweep of the rotating job trial (keys 6/7/8)."""
+
+    def _run(self, *, progress, sweep_result=None, progress_error=None):
+        session = FakeSession()
+        ctx = []
+        if progress_error is not None:
+            ctx.append(
+                patch("client.dungeon_care.rotating_trial_progress", side_effect=progress_error)
+            )
+        else:
+            ctx.append(patch("client.dungeon_care.rotating_trial_progress", return_value=progress))
+        ctx.append(
+            patch(
+                "client.dungeon_care.run_dungeon_sweep",
+                return_value=sweep_result or {"ok": True, "code": 0, "rewards": [1, 2, 3]},
+            )
+        )
+        with ctx[0], ctx[1] as sweep_mock:
+            result = run_daily_trial_sweep(session, log=lambda _line: None)
+        return result, sweep_mock
+
+    def test_sweeps_todays_maxed_job_trial(self) -> None:
+        # Live 2026-10-11: key 7 cleared 100/100, playList [7,4,3,12,2,1,5].
+        result, sweep_mock = self._run(
+            progress=trial_progress(play_list=[7, 4, 3, 12, 2, 1, 5])
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["attempted"])
+        self.assertEqual(result["key"], 7)
+        self.assertEqual(result["rewards"], 3)
+        self.assertEqual(result["play_list"], [7, 4, 3, 12, 2, 1, 5])
+        sweep_mock.assert_called_once()
+        kwargs = sweep_mock.call_args.kwargs
+        self.assertEqual((kwargs["key"], kwargs["level"], kwargs["sector"]), (7, 100, 1))
+
+    def test_second_sweep_of_the_day_is_a_clean_skip(self) -> None:
+        # Server answers -29004 던전 소탕이 불가능한 상태입니다 once today's sweep is used.
+        result, sweep_mock = self._run(
+            progress=trial_progress(),
+            sweep_result={"ok": False, "code": -29004, "message": "던전 소탕이 불가능한 상태입니다."},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skipped_reason"], "already_swept_today")
+        self.assertEqual(sweep_mock.call_count, 1)
+
+    def test_not_maxed_defers_to_dungeon_tower(self) -> None:
+        result, sweep_mock = self._run(progress=trial_progress(cleared=42, max_level=100))
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["attempted"])
+        self.assertEqual(result["skipped_reason"], "not_at_max_level")
+        sweep_mock.assert_not_called()
+
+    def test_non_job_tower_key_is_left_to_dungeon_tower(self) -> None:
+        result, sweep_mock = self._run(
+            progress=trial_progress(key=12, cleared=31, max_level=None, play_list=[12, 4])
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skipped_reason"], "no_job_trial_today")
+        sweep_mock.assert_not_called()
+
+    def test_unresolvable_playlist_is_a_clean_skip(self) -> None:
+        result, sweep_mock = self._run(
+            progress=None, progress_error=RuntimeError("playList empty")
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skipped_reason"], "tower_unresolved:RuntimeError")
+        sweep_mock.assert_not_called()
+
+    def test_unexpected_sweep_error_is_reported(self) -> None:
+        result, _sweep = self._run(
+            progress=trial_progress(),
+            sweep_result={"ok": False, "code": -99999, "message": "boom"},
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], -99999)
 
 
 if __name__ == "__main__":

@@ -463,6 +463,109 @@ def rotating_trial_progress(session: GameSession) -> dict[str, Any]:
     return progress
 
 
+# 던전 소탕이 불가능한 상태입니다 — the sweep was already taken (daily trial).
+TRIAL_SWEEP_DONE_CODES = frozenset({-29004})
+
+
+def run_daily_trial_sweep(
+    session: GameSession,
+    *,
+    log: LogFn = print,
+) -> dict[str, Any]:
+    """Sweep today's rotating job trial once.
+
+    ``GameData.Dungeon`` keys 6/7/8 (``GT_DungeonTrial_Job1/2/3``) have
+    ``CostType: None`` / ``Cost: 0`` / ``PlayCount: 0``: they cost nothing and
+    the daily rotation is the only limit.  Exactly one of them appears in
+    ``dungeon/list._playList`` per day, so this is the once-a-day sweep.
+
+    Live 2026-10-11 (key=7, cleared 100/100): one sweep returned 200 rewards
+    (goods 250 背饰经验 / 251 背饰特性材料) and an immediate second sweep was
+    rejected with -29004, confirming one sweep per day.  Repeating it needs a
+    ``DungeonReset_Trial`` (104) ticket, so a -29004 is reported as "already
+    done today" rather than a failure.
+
+    Climbing a trial that is not maxed yet stays with ``main.py dungeon tower``;
+    this step only collects the free daily sweep.
+    """
+    result: dict[str, Any] = {
+        "ok": True,
+        "attempted": False,
+        "key": None,
+        "play_list": [],
+        "skipped_reason": None,
+        "code": None,
+        "message": None,
+        "rewards": 0,
+    }
+
+    try:
+        progress = rotating_trial_progress(session)
+    except Exception as exc:
+        result["skipped_reason"] = f"tower_unresolved:{type(exc).__name__}"
+        log(f"[*] dungeon trial skip: cannot resolve today's trial ({exc})")
+        return result
+
+    key = _int(progress.get("key"), 0)
+    result["key"] = key
+    result["play_list"] = list(progress.get("play_list") or [])
+
+    if key not in JOB_TRIAL_DUNGEON_KEYS:
+        result["skipped_reason"] = "no_job_trial_today"
+        log(
+            f"[*] dungeon trial skip: today's tower key={key} is not a job trial "
+            f"play_list={result['play_list']}"
+        )
+        return result
+
+    cleared = _int(progress.get("cleared_level"), 0)
+    max_level = progress.get("max_level")
+    max_level = _int(max_level, 0) if max_level is not None else None
+    if max_level is None or cleared < max_level:
+        result["skipped_reason"] = "not_at_max_level"
+        log(
+            f"[*] dungeon trial skip: key={key} cleared={cleared}/{max_level} "
+            "not maxed (use `dungeon tower` to climb)"
+        )
+        return result
+
+    config = ADVANCING_DUNGEON_CONFIG.get(key) or {}
+    level = cleared
+    sector = int(config.get("sector") or 1)
+    if str(config.get("dynamic_sector") or "") == "lost_tower":
+        _stage, sector = dungeon_api.lost_tower_battle_position(level)
+
+    result["attempted"] = True
+    result["level"] = level
+    result["sector"] = sector
+    one = run_dungeon_sweep(session, key=key, level=level, sector=sector, log=log)
+    result["code"] = one.get("code")
+    result["message"] = one.get("message")
+    result["rewards"] = len(one.get("rewards") or [])
+
+    if one.get("ok"):
+        log(
+            f"[+] dungeon trial sweep ok key={key} level={level} "
+            f"rewards={result['rewards']}"
+        )
+        return result
+
+    if _int(one.get("code"), 0) in TRIAL_SWEEP_DONE_CODES:
+        result["skipped_reason"] = "already_swept_today"
+        log(
+            f"[*] dungeon trial already swept today key={key} "
+            f"code={result['code']} ({result['message']})"
+        )
+        return result
+
+    result["ok"] = False
+    log(
+        f"[-] dungeon trial sweep fail key={key} level={level} "
+        f"code={result['code']} msg={result['message']}"
+    )
+    return result
+
+
 def format_advancing_dungeon_rewards(rewards: Sequence[dict[str, Any]]) -> str:
     """Aggregate duplicate reward rows into one concise terminal string."""
     totals: dict[tuple[int, Any], int] = {}
@@ -1198,16 +1301,18 @@ def run_dungeon_auto_care(
     session: GameSession,
     *,
     include_guild: bool = True,
+    include_trial: bool = True,
     log: LogFn = print,
 ) -> dict[str, Any]:
     """auto dungeon flow:
 
     1. claim remaining ads by `_adCount` (all keys, including 10000/10020)
-    2. for ordinary dungeons with ticket stock: sweep the cleared floor so every
+    2. sweep today's rotating job trial once (free; keys 6/7/8)
+    3. for ordinary dungeons with ticket stock: sweep the cleared floor so every
        sweep spends one ticket and pays rewards
-    3. stop that dungeon when the stock runs out, nothing has been cleared yet
+    4. stop that dungeon when the stock runs out, nothing has been cleared yet
        (`no_cleared_level`), or the server rejects the sweep
-    4. stageKey 10000 / 10020 (keys 1/2): ads only.  Their tickets are reserved
+    5. stageKey 10000 / 10020 (keys 1/2): ads only.  Their tickets are reserved
        for the recurring Guide tasks 9006/9007 and are spent by
        `run_series_quest_care`, never burned here
 
@@ -1217,6 +1322,7 @@ def run_dungeon_auto_care(
     result: dict[str, Any] = {
         "ok": True,
         "ad": None,
+        "trial": None,
         "clears": [],
         "skipped_battle": [],
         "total_clears": 0,
@@ -1236,6 +1342,20 @@ def run_dungeon_auto_care(
     }
     if not ad.get("ok"):
         result["ok"] = False
+
+    if include_trial:
+        trial = run_daily_trial_sweep(session, log=log)
+        result["trial"] = {
+            "ok": trial.get("ok"),
+            "key": trial.get("key"),
+            "level": trial.get("level"),
+            "attempted": trial.get("attempted"),
+            "rewards": trial.get("rewards"),
+            "code": trial.get("code"),
+            "skip": trial.get("skipped_reason"),
+        }
+        if not trial.get("ok"):
+            result["ok"] = False
 
     meta = load_key_meta()
     key_stage = load_key_stage_map()
@@ -1412,8 +1532,11 @@ def run_dungeon_auto_care(
             f"tickets_after={stock_after}"
         )
 
+    trial = result.get("trial") or {}
     log(
         f"[*] dungeon-auto summary ad_ok={result['ad'].get('total_ok')} "
+        f"trial_key={trial.get('key')} trial_rewards={trial.get('rewards')} "
+        f"trial_skip={trial.get('skip')} "
         f"clears={result['total_clears']} sweeps={result['total_sweeps']} "
         f"advances={result['total_advances']} "
         f"clear_fail={result['total_clear_fail']} "

@@ -153,7 +153,7 @@ python3 main.py auto
 3. 每日商店购买：`/api/shop/list` 的 `_buyCount` 为剩余额度，>0 才买。服务端回答 `-32012`（已下架/轮换）时记为 skip 而不是失败
 4. 每日抽卡：`/api/gasha/list` 里凡是 `_isDailyCanGet=true` 的卡池，逐个发 `{_key, _count: 10, _isDaily: true}`。`GameData.Gasha` 中每日档为 `DailyCount=10` 次 × `DailyCurrencyCost=300` Crystal，即**一次 10 连 = 3000 免费钻**。卡池列表动态获取，新池/轮换池无需改代码；某个池失败（钻不够、中途下架等）只记录并跳过，不影响后续任务
 5. 公会：未出席则出席；训练场/道场奖励未领取则领取；读取实时门票 `107/108`，分别按剩余次数执行 `camp-sweep`（请求只传 `_key`）。角色**没有公会**时（`camp/info` 返回 `-58002`）整体记为 `skip=not_in_camp`，不再逐项报错
-6. 副本：先按 `_adCount` 领广告票；普通副本用 `/api/dungeon/sweep` 扫荡已通关层，每扫一次真正扣 1 张券并给奖励，券扫完即停（`_level=0` 无层可扫的副本记 `no_cleared_level` 跳过）。**key1/2（Lamp/Lava）只领广告、不扫荡 —— 它们的券专门留给系列任务 9006/9007 消耗**；Firewall 保持特殊规则
+6. 副本：先按 `_adCount` 领广告票；再扫当日**职业试炼**一次（keys 6/7/8 里 `_playList` 开着的那本，`CostType=None/Cost=0` 不花券，满级才扫，第二次会被 `-29004` 拒 → 记为今天已完成）；最后普通副本用 `/api/dungeon/sweep` 扫荡已通关层，每扫一次真正扣 1 张券并给奖励，券扫完即停（`_level=0` 无层可扫的记 `no_cleared_level` 跳过）。**key1/2（Lamp/Lava）只领广告、不扫荡 —— 它们的券专门留给系列任务 9006/9007 消耗**；Firewall 保持特殊规则
 7. 系列任务：检查 Guide 循环链 `9000–9014`，自动执行装备生成、无 Boss 小怪计数、技能/成员生成，以及 Lamp/Lava 两个副本任务；已完成的任务会调用 `quest/complete` 并继续下一项。区域通关任务只在累计值已经满足时领取，不主动推进主线。`DungeonClear` 用 `/api/dungeon/sweep`（已通关层）完成：它才真正扣券、发奖励并回传递增的任务值（实测 key=2：券 102 17→16，任务 9007 value 1→2）；battle wire 在 1.5.0 会返回 `_code:0` 但什么都不变，只在该副本从未通关、无层可扫时兜底用一次。遇门票为 0 时记录 `dungeon_no_attempts` 并跳过本阶段，后续 `auto` 继续运行
 8. 训练 / Lab：有完成项则领取 → 重开同一训练 → 请求大家帮助
 9. 探查数码世界 / Mine：耗尽体力捡特训芯片，可冲锋/钻头，尝试里程奖励

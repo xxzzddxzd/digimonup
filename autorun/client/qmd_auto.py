@@ -358,16 +358,21 @@ def run_auto_once(
                 except GuildSessionKicked as gk:
                     raise SessionKicked(gk.where, body=gk.body) from gk
 
-                # dungeon: claim remaining ads, then burn tickets (skip battle 10000/10020)
+                # dungeon: claim ads, sweep today's free job trial, then burn
+                # tickets (keys 1/2 stay reserved for the Guide chain)
                 try:
                     dad = run_dungeon_auto_care(session, include_guild=False, log=log)
                     ad = dad.get("ad") or {}
+                    trial = dad.get("trial") or {}
                     _append_result_log(
                         result_path,
                         result="dungeon",
                         detail=(
                             f"ok={dad.get('ok')} "
                             f"ad_ok={ad.get('total_ok')} ad_fail={ad.get('total_fail')} "
+                            f"trial={trial.get('key')} "
+                            f"trial_rewards={trial.get('rewards')} "
+                            f"trial_skip={trial.get('skip')} "
                             f"clears={dad.get('total_clears')} "
                             f"sweeps={dad.get('total_sweeps')} "
                             f"advances={dad.get('total_advances')} "
