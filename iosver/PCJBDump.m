@@ -11,6 +11,9 @@
 #import <fcntl.h>
 #import <errno.h>
 #import <sys/stat.h>
+#import <setjmp.h>
+#import <signal.h>
+#import <stdbool.h>
 
 typedef void *(*il2cpp_domain_get_t)(void);
 typedef void **(*il2cpp_domain_get_assemblies_t)(const void *domain, size_t *size);
@@ -78,6 +81,27 @@ static const char *kKeywords[] = {
     "DataInfo", "StageData", "RegionData",
     "C_Result", "wRequest", "wResponse",
     "E_GOODS_TYPE", "GOODS_TYPE", "E_STAT", "E_ITEM",
+    "PS_BattleStart_Stage", "PS_BattleEnd_Stage",
+    NULL
+};
+
+// Dump these first so a mid-run kill still yields the RVAs PCJBProbe needs.
+static const char *kPriorityClasses[] = {
+    "QuestInfo", "PS_Quest", "UILogin", "ItemInfo", "UIItemSelect",
+    "MainScene", "GameInfo", "UIGardenMineRowItem", "MineCellInfo",
+    "UIGardenMine", "MineInfo", "UIContentsScene", "BattleInfoParamClient",
+    "GlobalObject", "DataUtil", "SelectiveCacheCleaner", "CacheCleaner",
+    "UILoginMessageBox", "LoginScene", "PS_BanInfo", "PS_Integrity",
+    "TimeRewardListParam", "PacketManager", "PacketSender", "PS_Auth",
+    "LoginResponseData", "UIPopupReward", "UIItemSpawnerInfo",
+    "PS_ItemEquip", "PS_ItemSell", "UIDungeonReady_Firewall",
+    "UIMainScene", "UIGuideQuestInfo", "BattleProcessor",
+    "ExceptionManager", "RequestData", "PS_MineInfos",
+    "PS_BattleStart_Stage", "PS_BattleEnd_Stage", "NavMeshSurface",
+    "Application", "GameObject", "Component", "Object", "Caching",
+    "DebugLogHandler", "UnhandledExceptionHandler",
+    "iOSNativeUnhandledExceptionHandler", "C_Result",
+    "RegionData", "StageData", "DataInfo",
     NULL
 };
 
@@ -103,14 +127,14 @@ static void StatusWrite(const char *fmt, ...) {
 
 static void InitOutputs(void) {
     const char *home = getenv("HOME");
-    char dumpPath[512] = "/tmp/il2cpp-150.dump";
-    char statusPath[512] = "/tmp/il2cpp-150.status";
+    char dumpPath[512] = "/tmp/il2cpp-152.dump";
+    char statusPath[512] = "/tmp/il2cpp-152.status";
     if (home && home[0]) {
         char dir[512];
         snprintf(dir, sizeof(dir), "%s/Library/Caches/PCJBProbe", home);
         mkdir(dir, 0755);
-        snprintf(dumpPath, sizeof(dumpPath), "%s/il2cpp-150.dump", dir);
-        snprintf(statusPath, sizeof(statusPath), "%s/il2cpp-150.status", dir);
+        snprintf(dumpPath, sizeof(dumpPath), "%s/il2cpp-152.dump", dir);
+        snprintf(statusPath, sizeof(statusPath), "%s/il2cpp-152.status", dir);
     }
     gStatusFD = open(statusPath, O_CREAT | O_WRONLY | O_APPEND, 0644);
     gOut = fopen(dumpPath, "w");
@@ -158,6 +182,15 @@ static bool NameMatches(const char *ns, const char *name) {
     return false;
 }
 
+static bool PriorityMatches(const char *name) {
+    if (!name) return false;
+    for (int i = 0; kPriorityClasses[i]; i++) {
+        if (!strcmp(name, kPriorityClasses[i])) return true;
+        if (strstr(name, kPriorityClasses[i])) return true;
+    }
+    return false;
+}
+
 static void DumpHex(const void *ptr, int words) {
     if (!InUnityFramework(ptr) || !gOut) return;
     const uint32_t *ins = (const uint32_t *)ptr;
@@ -186,10 +219,11 @@ static void DumpClass(void *klass, const char *imageName) {
         while ((field = p_class_get_fields(klass, &iter))) {
             const char *fname = p_field_get_name(field) ?: "";
             size_t off = p_field_get_offset(field);
-            // Enum literals carry their constant in metadata; read it so the
-            // dump gives authoritative name -> value pairs.
+            // Enum literals carry their constant in metadata.  Only read those;
+            // calling static_get_value on arbitrary offset-0 fields can crash.
             int32_t literal = 0;
-            if (p_field_static_get_value && off == 0) {
+            if (p_field_static_get_value && off == 0 &&
+                parentName && !strcmp(parentName, "Enum")) {
                 p_field_static_get_value(field, &literal);
             }
             fprintf(gOut, "  FIELD offset=0x%lx value=%d name=%s\n",
@@ -274,6 +308,39 @@ static bool LocateUnityFramework(void) {
     return false;
 }
 
+static sigjmp_buf gDumpJmp;
+static volatile sig_atomic_t gInProtectedDump;
+static struct sigaction gOldSegv;
+static struct sigaction gOldBus;
+
+static void DumpCrashHandler(int sig) {
+    if (gInProtectedDump) siglongjmp(gDumpJmp, sig);
+}
+
+static void DumpClassProtected(void *klass, const char *imageName) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = DumpCrashHandler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &gOldSegv);
+    sigaction(SIGBUS, &sa, &gOldBus);
+    gInProtectedDump = 1;
+    int jumped = sigsetjmp(gDumpJmp, 1);
+    if (jumped == 0) {
+        DumpClass(klass, imageName);
+        if (gOut) fflush(gOut);
+    } else {
+        StatusWrite("skipped crashing class sig=%d image=%s", jumped, imageName ?: "");
+        if (gOut) {
+            fprintf(gOut, "# CRASH sig=%d image=%s\n", jumped, imageName ?: "");
+            fflush(gOut);
+        }
+    }
+    gInProtectedDump = 0;
+    sigaction(SIGSEGV, &gOldSegv, NULL);
+    sigaction(SIGBUS, &gOldBus, NULL);
+}
+
 static void DumpAll(void) {
     if (!p_domain_get) {
         StatusWrite("missing il2cpp_domain_get");
@@ -299,26 +366,38 @@ static void DumpAll(void) {
     }
     int classIndex = 0;
     int dumped = 0;
-    for (size_t i = 0; i < asmCount; i++) {
-        void *image = p_assembly_get_image(assemblies[i]);
-        if (!image) continue;
-        const char *imageName = p_image_get_name ? p_image_get_name(image) : "";
-        size_t classCount = p_image_get_class_count ? p_image_get_class_count(image) : 0;
-        if (gOut) fprintf(gOut, "IMAGE name=%s classes=%zu\n", imageName ?: "", classCount);
-        for (size_t c = 0; c < classCount; c++) {
-            void *klass = p_image_get_class(image, c);
-            classIndex++;
-            if (!klass) continue;
-            const char *name = p_class_get_name ? p_class_get_name(klass) : NULL;
-            const char *ns = p_class_get_namespace ? p_class_get_namespace(klass) : NULL;
-            if (NameMatches(ns, name)) {
-                DumpClass(klass, imageName);
-                dumped++;
+    for (int pass = 0; pass < 2; pass++) {
+        StatusWrite("pass=%d", pass);
+        classIndex = 0;
+        for (size_t i = 0; i < asmCount; i++) {
+            void *image = p_assembly_get_image(assemblies[i]);
+            if (!image) continue;
+            const char *imageName = p_image_get_name ? p_image_get_name(image) : "";
+            size_t classCount = p_image_get_class_count ? p_image_get_class_count(image) : 0;
+            if (gOut && pass == 0) {
+                fprintf(gOut, "IMAGE name=%s classes=%zu\n", imageName ?: "", classCount);
             }
-            if ((classIndex % 2000) == 0) {
-                StatusWrite("progress classes=%d dumped=%d image=%s",
-                            classIndex, dumped, imageName ?: "");
-                if (gOut) fflush(gOut);
+            for (size_t c = 0; c < classCount; c++) {
+                void *klass = p_image_get_class(image, c);
+                classIndex++;
+                if (!klass) continue;
+                const char *name = p_class_get_name ? p_class_get_name(klass) : NULL;
+                const char *ns = p_class_get_namespace ? p_class_get_namespace(klass) : NULL;
+                bool want = false;
+                if (pass == 0) {
+                    want = PriorityMatches(name);
+                } else {
+                    want = NameMatches(ns, name) && !PriorityMatches(name);
+                }
+                if (want) {
+                    DumpClassProtected(klass, imageName);
+                    dumped++;
+                }
+                if ((classIndex % 2000) == 0) {
+                    StatusWrite("progress pass=%d classes=%d dumped=%d image=%s",
+                                pass, classIndex, dumped, imageName ?: "");
+                    if (gOut) fflush(gOut);
+                }
             }
         }
     }
@@ -326,6 +405,23 @@ static void DumpAll(void) {
     if (gOut) {
         fprintf(gOut, "# DONE classes=%d dumped=%d\n", classIndex, dumped);
         fflush(gOut);
+        fclose(gOut);
+        gOut = NULL;
+    }
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        char src[512];
+        snprintf(src, sizeof(src), "%s/Library/Caches/PCJBProbe/il2cpp-152.dump", home);
+        FILE *in = fopen(src, "r");
+        FILE *out = fopen("/tmp/il2cpp-152.dump", "w");
+        if (in && out) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), in)) > 0) fwrite(buf, 1, n, out);
+            StatusWrite("copied dump to /tmp/il2cpp-152.dump");
+        }
+        if (in) fclose(in);
+        if (out) fclose(out);
     }
     if (thread && p_thread_detach) p_thread_detach(thread);
 }
@@ -333,7 +429,7 @@ static void DumpAll(void) {
 static void *DumpThread(void *arg) {
     (void)arg;
     // Stay out of process startup / AppGuard init.
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < 6; i++) {
         sleep(1);
         StatusWrite("delay %ds", i + 1);
     }

@@ -33,9 +33,9 @@ BatchStatusFn = Callable[[int, int, dict[str, Any], Any], None]
 SESSION_KICK = -19006
 GOODS_GOLD = 0  # E_GOODS_TYPE.Gold — 比特 / bit
 GOODS_ITEM_TICKET = 50  # E_GOODS_TYPE.ItemTicket — 装备生成券
-SUPER_SPAWN_COUNT = 250  # 1.5.0 live client super-spawn batch size
+SUPER_SPAWN_COUNT = 250  # 1.5.2 live client super-spawn batch size
 SPAWN_COOLDOWN_CODE = -35012
-# The 1.5.0 client naturally spaces requests with its result animation.  The
+# The 1.5.2 client naturally spaces requests with its result animation.  The
 # API does not return a cooldown timestamp. Live verification showed a roughly
 # five-second gate, so start conservatively and learn a longer interval from
 # -35012 when necessary.
@@ -920,7 +920,7 @@ def run_spawn_batches(
     progress: ProgressFn | None = None,
     on_batch: BatchStatusFn | None = None,
 ) -> dict[str, Any]:
-    """Open equipment through 1.5.0 super spawn-and-sell, strictly serially.
+    """Open equipment through 1.5.2 super spawn-and-sell, strictly serially.
 
     Every successful request sends ``_count=250`` and ``_isSuper=true``.
     Default: open as many complete 250-ticket batches as startup stock allows.

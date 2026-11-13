@@ -4,9 +4,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-try:  # `python3 -m unittest tests.test_version_150`
+try:  # `python3 -m unittest tests.test_version_152`
     from ._stubs import install_stubs
-except ImportError:  # `python3 tests/test_version_150.py`
+except ImportError:  # `python3 tests/test_version_152.py`
     from _stubs import install_stubs
 
 install_stubs()
@@ -38,7 +38,7 @@ class SequenceClient(FakeClient):
         return self.responses.pop(0)
 
 
-class Version150Tests(unittest.TestCase):
+class Version152Tests(unittest.TestCase):
     def test_stale_account_capture_does_not_downgrade_client_profile(self) -> None:
         config = ClientConfig(load_saved_account=False)
 
@@ -51,8 +51,8 @@ class Version150Tests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(config.version, "1.5.0")
-        self.assertEqual(config.unity_version, "6000.3.11f1")
+        self.assertEqual(config.version, "1.5.2")
+        self.assertEqual(config.unity_version, "6000.3.27f2")
         self.assertEqual(config.account.device_model, "iPhone15,3")
 
     def test_spawn_and_sell_sends_new_is_super_field(self) -> None:
